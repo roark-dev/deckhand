@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 const label = "com.deckhand.daemon"
@@ -118,14 +119,44 @@ func Install() error {
 
 	switch runtime.GOOS {
 	case "darwin":
+		domain := fmt.Sprintf("gui/%d", os.Getuid())
+		target := domain + "/" + label
+		loaded := func() bool {
+			return exec.Command("launchctl", "print", target).Run() == nil
+		}
+		unchanged := false
+		if prev, err := os.ReadFile(path); err == nil && string(prev) == LaunchdPlist(s) {
+			unchanged = true
+		}
+		if unchanged && loaded() {
+			// Re-running install must be a safe no-op-plus-restart, never an
+			// error and never a torn-down service.
+			_ = exec.Command("launchctl", "kickstart", "-k", target).Run()
+			fmt.Println("already installed — restarted the service")
+			return nil
+		}
 		if err := os.WriteFile(path, []byte(LaunchdPlist(s)), 0o600); err != nil {
 			return err
 		}
-		// Re-installs: bootout any previous registration first (ignore
-		// failure — it usually just means "not loaded").
-		_ = exec.Command("launchctl", "bootout", fmt.Sprintf("gui/%d/%s", os.Getuid(), label)).Run()
-		if out, err := exec.Command("launchctl", "bootstrap", fmt.Sprintf("gui/%d", os.Getuid()), path).CombinedOutput(); err != nil {
-			return fmt.Errorf("launchctl bootstrap: %v: %s", err, strings.TrimSpace(string(out)))
+		// Replacing a loaded job: bootout, then WAIT for launchd to actually
+		// unload it — an immediate re-bootstrap races and fails with
+		// "Bootstrap failed: 5: Input/output error".
+		if loaded() {
+			_ = exec.Command("launchctl", "bootout", target).Run()
+			for i := 0; i < 20 && loaded(); i++ {
+				time.Sleep(250 * time.Millisecond)
+			}
+		}
+		var out []byte
+		var bootErr error
+		for attempt := 0; attempt < 3; attempt++ {
+			if out, bootErr = exec.Command("launchctl", "bootstrap", domain, path).CombinedOutput(); bootErr == nil {
+				break
+			}
+			time.Sleep(time.Second)
+		}
+		if bootErr != nil {
+			return fmt.Errorf("launchctl bootstrap: %v: %s", bootErr, strings.TrimSpace(string(out)))
 		}
 		fmt.Printf("installed %s\nstarted via launchd (runs at login; logs: %s and ~/.deckhand/daemon.log)\n", path, s.LogPath)
 	case "linux":

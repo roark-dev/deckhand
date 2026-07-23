@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,8 +31,19 @@ var initCmd = &cobra.Command{
 	Use:   "init",
 	Short: "Interactive setup: write ~/.deckhand/config.yaml",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if _, err := os.Stat(paths.ConfigFile); err == nil {
-			return fmt.Errorf("%s already exists — edit it directly, or delete it to re-run init", paths.ConfigFile)
+		if existing, err := config.Load(paths.ConfigFile); err == nil {
+			// Re-running init must not be an error when there's nothing to
+			// do — the whole point is "run two commands in the repo".
+			detected := config.DetectGitHubURL(".")
+			if detected == "" || detected == existing.GitHub.URL {
+				fmt.Printf("already configured for %s (%s)\n", existing.GitHub.URL, paths.ConfigFile)
+				fmt.Println("nothing to do — next: `deckhand service install`, then `runs-on: " + existing.ScaleSet.Name + "`")
+				return nil
+			}
+			return fmt.Errorf("%s already exists but targets %s, not this repo (%s) — one deckhand serves one org/repo; edit the config, or use DECKHAND_HOME for a second instance",
+				paths.ConfigFile, existing.GitHub.URL, detected)
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("%s exists but is invalid: %w (fix or delete it, then re-run init)", paths.ConfigFile, err)
 		}
 		in := bufio.NewReader(os.Stdin)
 		var askErr error
