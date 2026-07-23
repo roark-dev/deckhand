@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -25,14 +26,24 @@ var initCmd = &cobra.Command{
 			return fmt.Errorf("%s already exists — edit it directly, or delete it to re-run init", paths.ConfigFile)
 		}
 		in := bufio.NewReader(os.Stdin)
+		var askErr error
 		ask := func(prompt, def string) string {
+			if askErr != nil {
+				return def
+			}
 			if def != "" {
 				fmt.Printf("%s [%s]: ", prompt, def)
 			} else {
 				fmt.Printf("%s: ", prompt)
 			}
-			line, _ := in.ReadString('\n')
+			line, err := in.ReadString('\n')
 			line = strings.TrimSpace(line)
+			if err != nil && line == "" {
+				// EOF / closed stdin: silently accepting every default would
+				// write a broken config; surface it instead.
+				askErr = fmt.Errorf("stdin closed during prompts — run init interactively or write %s by hand", paths.ConfigFile)
+				return def
+			}
 			if line == "" {
 				return def
 			}
@@ -49,6 +60,9 @@ var initCmd = &cobra.Command{
 		tokenEnv := ask("Environment variable holding the token (recommended over storing it in the file)", "DECKHAND_GITHUB_TOKEN")
 		name := ask("Scale set name (this is what `runs-on:` will reference)", "deckhand")
 		slotsN := ask("Slots (max concurrent jobs)", strconv.Itoa(4))
+		if askErr != nil {
+			return askErr
+		}
 		n, err := strconv.Atoi(slotsN)
 		if err != nil {
 			return fmt.Errorf("not a number: %s", slotsN)
@@ -100,7 +114,7 @@ var doctorCmd = &cobra.Command{
 		cfg, err := loadConfig()
 		check("config "+paths.ConfigFile, err)
 		if err != nil {
-			return fmt.Errorf("doctor found problems")
+			return errors.New("doctor found problems")
 		}
 
 		prov, err := runner.New(runner.Options{Image: cfg.Runner.Image, ScaleSetName: cfg.ScaleSet.Name})
@@ -111,11 +125,19 @@ var doctorCmd = &cobra.Command{
 		}
 		check("docker daemon reachable", err)
 
-		_, err = cfg.ResolveToken()
-		if cfg.GitHub.Auth.App != nil {
-			err = nil
+		if app := cfg.GitHub.Auth.App; app != nil {
+			_, err = os.ReadFile(app.PrivateKeyFile)
+			check("github app private key readable", err)
+		} else {
+			_, err = cfg.ResolveToken()
+			check("credential resolvable", err)
 		}
-		check("credential resolvable", err)
+
+		if strings.Contains(cfg.Runner.Image, "@sha256:") {
+			check("runner image pinned by digest", nil)
+		} else {
+			fmt.Printf("  ! runner image %q is a mutable tag — pin a digest (image@sha256:...) for supply-chain safety\n", cfg.Runner.Image)
+		}
 
 		ghErr := func() error {
 			client, err := cfg.ScalesetClient()
@@ -138,7 +160,7 @@ var doctorCmd = &cobra.Command{
 		colimaPosture(check)
 
 		if failed {
-			return fmt.Errorf("doctor found problems")
+			return errors.New("doctor found problems")
 		}
 		fmt.Println("all good")
 		return nil

@@ -4,6 +4,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -16,9 +17,17 @@ import (
 )
 
 // DefaultRunnerImage is the official GitHub Actions runner image. Users are
-// encouraged to pin a digest in their config; the tag default keeps first-run
-// friction low.
+// encouraged to pin a digest in their config (the daemon and doctor warn on a
+// mutable tag); the tag default keeps first-run friction low and avoids
+// shipping a hardcoded digest that goes stale.
 const DefaultRunnerImage = "ghcr.io/actions/actions-runner:latest"
+
+// MaxSlots bounds the slot count everywhere (config and runtime scale).
+const MaxSlots = 64
+
+// DefaultPidsLimit caps processes per job container unless overridden — a
+// fork bomb in workflow code must not take down the docker host.
+const DefaultPidsLimit = 2048
 
 type Config struct {
 	GitHub   GitHub   `yaml:"github"`
@@ -74,6 +83,12 @@ type Runner struct {
 	// Env is extra environment for job containers (never put secrets here;
 	// anything a job can read, job code can exfiltrate).
 	Env map[string]string `yaml:"env,omitempty"`
+	// MemoryMB caps each job container's memory. 0 = unlimited (default);
+	// set it on shared hosts so one job cannot OOM the others.
+	MemoryMB int `yaml:"memory_mb"`
+	// PidsLimit caps processes per job container. Defaults to
+	// DefaultPidsLimit; -1 = unlimited (explicitly).
+	PidsLimit int `yaml:"pids_limit"`
 }
 
 type Metrics struct {
@@ -116,7 +131,7 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	cfg := &Config{}
-	dec := yaml.NewDecoder(strings.NewReader(string(raw)))
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
 	dec.KnownFields(true)
 	if err := dec.Decode(cfg); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
@@ -140,6 +155,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Runner.Image == "" {
 		c.Runner.Image = DefaultRunnerImage
+	}
+	if c.Runner.PidsLimit == 0 {
+		c.Runner.PidsLimit = DefaultPidsLimit
+	}
+	if c.Runner.PidsLimit < 0 {
+		c.Runner.PidsLimit = 0 // -1 in yaml means explicitly unlimited
 	}
 }
 
@@ -174,8 +195,11 @@ func (c *Config) Validate() error {
 	if a.App != nil && (a.App.ClientID == "" || a.App.InstallationID == 0 || a.App.PrivateKeyFile == "") {
 		return errors.New("github.auth.app needs client_id, installation_id and private_key_file")
 	}
-	if c.Slots.Count < 1 || c.Slots.Count > 64 {
-		return fmt.Errorf("slots.count %d out of range 1-64", c.Slots.Count)
+	if c.Slots.Count < 1 || c.Slots.Count > MaxSlots {
+		return fmt.Errorf("slots.count %d out of range 1-%d", c.Slots.Count, MaxSlots)
+	}
+	if c.Runner.MemoryMB < 0 {
+		return errors.New("runner.memory_mb cannot be negative")
 	}
 	if c.Slots.Warm < 0 || c.Slots.Warm > c.Slots.Count {
 		return fmt.Errorf("slots.warm %d must be within 0..slots.count", c.Slots.Warm)

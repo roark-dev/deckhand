@@ -8,40 +8,56 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/roark-dev/deckhand/internal/broker"
 	"github.com/roark-dev/deckhand/internal/bus"
 )
 
+// maxBody bounds control-request bodies; every legitimate payload is tiny.
+const maxBody = 1 << 20
+
+// maxEventStreams bounds concurrent /v1/events subscribers.
+const maxEventStreams = 32
+
 type Server struct {
-	broker   *broker.Broker
-	bus      *bus.Bus
-	shutdown func(cause string)
-	version  string
+	broker       *broker.Broker
+	bus          *bus.Bus
+	shutdown     func(cause string)
+	version      string
+	eventStreams atomic.Int64
 }
 
 func NewServer(b *broker.Broker, eventBus *bus.Bus, version string, shutdown func(cause string)) *Server {
 	return &Server{broker: b, bus: eventBus, shutdown: shutdown, version: version}
 }
 
-// Serve listens on the unix socket until ctx is done.
+// Serve listens on the unix socket until ctx is done. The socket is created
+// with owner-only permissions from the first instant (umask), and every
+// accepted connection is verified to come from this uid (peer credentials) —
+// filesystem modes alone are not the only line of defense.
 func (s *Server) Serve(ctx context.Context, socketPath string) error {
 	_ = os.Remove(socketPath)
+	old := unix.Umask(0o177)
 	ln, err := net.Listen("unix", socketPath)
+	unix.Umask(old)
 	if err != nil {
 		return fmt.Errorf("control socket: %w", err)
 	}
-	if err := os.Chmod(socketPath, 0o600); err != nil {
-		ln.Close()
-		return err
+	srv := &http.Server{
+		Handler:           s.mux(),
+		ReadHeaderTimeout: 5 * time.Second,
 	}
-	srv := &http.Server{Handler: s.mux()}
 	go func() {
 		<-ctx.Done()
 		shutCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -49,11 +65,38 @@ func (s *Server) Serve(ctx context.Context, socketPath string) error {
 		_ = srv.Shutdown(shutCtx)
 		_ = os.Remove(socketPath)
 	}()
-	err = srv.Serve(ln)
+	err = srv.Serve(&peerCheckedListener{Listener: ln, uid: os.Getuid()})
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
 	return err
+}
+
+// peerCheckedListener rejects connections whose peer uid is neither ours nor
+// root's.
+type peerCheckedListener struct {
+	net.Listener
+	uid int
+}
+
+func (l *peerCheckedListener) Accept() (net.Conn, error) {
+	for {
+		conn, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		uc, ok := conn.(*net.UnixConn)
+		if !ok {
+			conn.Close()
+			continue
+		}
+		peer, err := peerUID(uc)
+		if err != nil || (peer != l.uid && peer != 0) {
+			conn.Close()
+			continue
+		}
+		return conn, nil
+	}
 }
 
 func (s *Server) mux() *http.ServeMux {
@@ -71,7 +114,7 @@ func (s *Server) mux() *http.ServeMux {
 		var req struct {
 			N int `json:"n"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := decodeBody(w, r, &req); err != nil {
 			httpErr(w, http.StatusBadRequest, err)
 			return
 		}
@@ -98,19 +141,20 @@ func (s *Server) mux() *http.ServeMux {
 			Mode  string `json:"mode"`
 			Force bool   `json:"force"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		if err := decodeBody(w, r, &req); err != nil {
 			httpErr(w, http.StatusBadRequest, err)
 			return
 		}
-		if err := s.broker.Stop(r.Context(), req.Mode, req.Force, s.shutdown); err != nil {
-			status := http.StatusInternalServerError
-			if errors.Is(err, broker.ErrBusy) {
-				status = http.StatusConflict
-			}
-			httpErr(w, status, err)
+		mode, err := broker.ParseStopMode(req.Mode)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err)
 			return
 		}
-		writeJSON(w, map[string]string{"stopping": req.Mode})
+		if err := s.broker.Stop(r.Context(), mode, req.Force, s.shutdown); err != nil {
+			httpErr(w, statusFor(err), err)
+			return
+		}
+		writeJSON(w, map[string]string{"stopping": string(mode)})
 	})
 	m.HandleFunc("POST /v1/slots/{id}/reclaim", func(w http.ResponseWriter, r *http.Request) {
 		id, err := strconv.Atoi(r.PathValue("id"))
@@ -121,16 +165,12 @@ func (s *Server) mux() *http.ServeMux {
 		var req struct {
 			Force bool `json:"force"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		if err := decodeBody(w, r, &req); err != nil {
 			httpErr(w, http.StatusBadRequest, err)
 			return
 		}
 		if err := s.broker.Reclaim(r.Context(), id, req.Force); err != nil {
-			status := http.StatusInternalServerError
-			if errors.Is(err, broker.ErrBusy) {
-				status = http.StatusConflict
-			}
-			httpErr(w, status, err)
+			httpErr(w, statusFor(err), err)
 			return
 		}
 		writeJSON(w, s.broker.Status())
@@ -150,7 +190,7 @@ func (s *Server) mux() *http.ServeMux {
 		}
 		logs, err := s.broker.SlotLogs(r.Context(), id, tail)
 		if err != nil {
-			httpErr(w, http.StatusNotFound, err)
+			httpErr(w, statusFor(err), err)
 			return
 		}
 		w.Header().Set("Content-Type", "text/plain")
@@ -159,8 +199,35 @@ func (s *Server) mux() *http.ServeMux {
 	return m
 }
 
+// decodeBody parses a size-bounded JSON body; an empty body decodes to the
+// zero value.
+func decodeBody(w http.ResponseWriter, r *http.Request, out any) error {
+	err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody)).Decode(out)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	return nil
+}
+
+func statusFor(err error) int {
+	switch {
+	case errors.Is(err, broker.ErrBusy):
+		return http.StatusConflict
+	case errors.Is(err, broker.ErrNotFound):
+		return http.StatusNotFound
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
 // serveEvents streams the event feed as ndjson (backlog first, then live).
 func (s *Server) serveEvents(w http.ResponseWriter, r *http.Request) {
+	if s.eventStreams.Add(1) > maxEventStreams {
+		s.eventStreams.Add(-1)
+		httpErr(w, http.StatusTooManyRequests, errors.New("too many event streams"))
+		return
+	}
+	defer s.eventStreams.Add(-1)
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		httpErr(w, http.StatusInternalServerError, errors.New("streaming unsupported"))
@@ -221,7 +288,8 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, ou
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		if strings.Contains(err.Error(), "connect:") || errors.Is(err, os.ErrNotExist) {
+		// errors.Is unwraps through *url.Error and *net.OpError.
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED) {
 			return fmt.Errorf("daemon not running (start it with `deckhand up`): %w", err)
 		}
 		return err
@@ -263,9 +331,11 @@ func (c *Client) Scale(ctx context.Context, n int) error {
 func (c *Client) Pause(ctx context.Context) error {
 	return c.do(ctx, http.MethodPost, "/v1/pause", nil, nil)
 }
+
 func (c *Client) Resume(ctx context.Context) error {
 	return c.do(ctx, http.MethodPost, "/v1/resume", nil, nil)
 }
+
 func (c *Client) Drain(ctx context.Context) error {
 	return c.do(ctx, http.MethodPost, "/v1/drain", nil, nil)
 }
@@ -286,7 +356,7 @@ func (c *Client) SlotLogs(ctx context.Context, slot, tail int) (string, error) {
 }
 
 // Events opens the ndjson event stream; the returned channel closes when the
-// stream ends. Call cancel (or cancel ctx) to stop.
+// stream ends. Cancel ctx to stop.
 func (c *Client) Events(ctx context.Context) (<-chan bus.Event, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://deckhand/v1/events", nil)
 	if err != nil {

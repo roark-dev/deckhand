@@ -22,12 +22,21 @@ func (s *scaler) HandleDesiredRunnerCount(ctx context.Context, assigned int) (in
 	b := s.b
 	b.retryErroredSlots()
 
-	desired := assigned + b.cfg.Slots.Warm
-
 	b.mu.Lock()
-	blocked := b.paused || b.draining || b.dockerDown
+	pausedOrDraining := b.paused || b.draining
+	dockerDown := b.dockerDown
 	b.mu.Unlock()
-	if blocked {
+
+	// Jobs GitHub already assigned to this scale set are OURS — no other
+	// runner will take them, so we run them even while paused/draining
+	// (stranding acquired jobs is worse than finishing them). Pause/drain
+	// only stop NEW capacity: no warm runners, no new acquisition (cap 0 via
+	// effectiveCap). Docker-down blocks spawning outright.
+	desired := assigned + b.cfg.Slots.Warm
+	if pausedOrDraining {
+		desired = assigned
+	}
+	if dockerDown {
 		desired = 0
 	}
 
@@ -43,6 +52,9 @@ func (s *scaler) HandleDesiredRunnerCount(ctx context.Context, assigned int) (in
 	if excess := live - desired; excess > 0 {
 		b.cullIdle(ctx, excess)
 	}
+	// Scale-down convergence: jobless runners on draining slots go now, not
+	// whenever GitHub happens to route them a job.
+	b.cullSlots(ctx, b.slots.DrainingReady(), "drained")
 	b.poke()
 	return b.slots.Live(), nil
 }
@@ -51,9 +63,9 @@ func (s *scaler) HandleJobStarted(ctx context.Context, job *scaleset.JobStarted)
 	b := s.b
 	info := &slots.Job{
 		RequestID:   job.RunnerRequestID,
-		Repo:        job.OwnerName + "/" + job.RepositoryName,
-		Workflow:    job.JobWorkflowRef,
-		DisplayName: job.JobDisplayName,
+		Repo:        bus.Sanitize(job.OwnerName + "/" + job.RepositoryName),
+		Workflow:    bus.Sanitize(job.JobWorkflowRef),
+		DisplayName: bus.Sanitize(job.JobDisplayName),
 		RunURL:      fmt.Sprintf("https://github.com/%s/%s/actions/runs/%d", job.OwnerName, job.RepositoryName, job.WorkflowRunID),
 		StartedAt:   time.Now(),
 	}
@@ -62,9 +74,8 @@ func (s *scaler) HandleJobStarted(ctx context.Context, job *scaleset.JobStarted)
 		sl.Job = info
 		sl.Since = time.Now()
 	})
-	slot := b.slotIndexOf(job.RunnerName)
 	if found {
-		b.event(bus.Info, slot, fmt.Sprintf("job started: %s (%s)", job.JobDisplayName, info.Repo))
+		b.event(bus.Info, b.slotIndexOf(job.RunnerName), fmt.Sprintf("job started: %s (%s)", info.DisplayName, info.Repo))
 	}
 	return nil
 }
@@ -73,16 +84,22 @@ func (s *scaler) HandleJobCompleted(ctx context.Context, job *scaleset.JobComple
 	b := s.b
 	slot := b.slotIndexOf(job.RunnerName)
 	var containerID string
-	b.slots.Mutate(job.RunnerName, func(sl *slots.Slot) {
+	found := b.slots.Mutate(job.RunnerName, func(sl *slots.Slot) {
 		sl.State = slots.Reaping
 		containerID = sl.ContainerID
 	})
-	if strings.EqualFold(job.Result, "succeeded") {
-		b.counters.Completed.Add(1)
-	} else {
-		b.counters.Failed.Add(1)
+	// Count only when we still owned the slot: if the container-exit watcher
+	// already reaped (and counted) this runner, a late JobCompleted must not
+	// count the same job twice.
+	if found {
+		if strings.EqualFold(job.Result, "succeeded") {
+			b.counters.completed.Add(1)
+		} else {
+			b.counters.failed.Add(1)
+		}
+		b.event(bus.Info, slot, fmt.Sprintf("job %s: %s (%s)",
+			bus.Sanitize(job.Result), bus.Sanitize(job.JobDisplayName), bus.Sanitize(job.OwnerName+"/"+job.RepositoryName)))
 	}
-	b.event(bus.Info, slot, fmt.Sprintf("job %s: %s (%s)", job.Result, job.JobDisplayName, job.OwnerName+"/"+job.RepositoryName))
 	if containerID != "" {
 		if err := b.provider.Remove(ctx, containerID); err != nil {
 			b.event(bus.Warn, slot, fmt.Sprintf("container remove failed: %v", err))
@@ -94,6 +111,9 @@ func (s *scaler) HandleJobCompleted(ctx context.Context, job *scaleset.JobComple
 }
 
 func (b *Broker) slotIndexOf(runnerName string) int {
+	if runnerName == "" {
+		return -1
+	}
 	for _, s := range b.slots.Snapshot() {
 		if s.RunnerName == runnerName {
 			return s.Index
@@ -104,22 +124,26 @@ func (b *Broker) slotIndexOf(runnerName string) int {
 
 // spawnOne reserves a slot, mints a JIT config and starts a runner container.
 // Returns false when no capacity or on failure (the failed slot goes to
-// Errored and is retried by a later HandleDesiredRunnerCount tick).
+// Errored and is retried after a cooldown).
 func (b *Broker) spawnOne(ctx context.Context) bool {
-	name := fmt.Sprintf("%s-s%d-%s", b.cfg.ScaleSet.Name, 0, uuid.NewString()[:8])
-	index, cpuset, ok := b.slots.Acquire(name)
+	if b.isDockerDown() {
+		return false
+	}
+	index, cpuset, ok := b.slots.Acquire()
 	if !ok {
 		return false
 	}
-	// The slot index is part of the runner name for at-a-glance mapping in
-	// GitHub's UI and docker ps; rewrite it now that we know the slot.
-	name = fmt.Sprintf("%s-s%d-%s", b.cfg.ScaleSet.Name, index, uuid.NewString()[:8])
-	b.slots.MutateIndex(index, func(sl *slots.Slot) { sl.RunnerName = name })
+	// The runner name embeds the slot index for at-a-glance mapping in
+	// GitHub's UI and docker ps, so it can only be minted after Acquire.
+	name := fmt.Sprintf("%s-s%d-%s", b.cfg.ScaleSet.Name, index, uuid.NewString()[:8])
+	b.slots.SetRunnerName(index, name)
 
 	fail := func(err error) bool {
-		b.counters.SpawnErrors.Add(1)
+		b.counters.spawnErrors.Add(1)
 		b.slots.MutateIndex(index, func(sl *slots.Slot) {
 			sl.State = slots.Errored
+			sl.RunnerName = ""
+			sl.ContainerID = ""
 			sl.Err = err.Error()
 			sl.Since = time.Now()
 		})
@@ -127,19 +151,21 @@ func (b *Broker) spawnOne(ctx context.Context) bool {
 		return false
 	}
 
-	jit, err := b.client.GenerateJitRunnerConfig(ctx, &scaleset.RunnerScaleSetJitRunnerSetting{
+	jit, err := b.gh.GenerateJitRunnerConfig(ctx, &scaleset.RunnerScaleSetJitRunnerSetting{
 		Name:       name,
 		WorkFolder: "/home/runner/_work",
-	}, b.scaleSet.ID)
+	}, b.scaleSetID())
 	if err != nil {
 		return fail(fmt.Errorf("jit config: %w", err))
 	}
 
 	if err := b.provider.EnsureImage(ctx); err != nil {
+		b.removeRunnerRegistration(ctx, name) // don't leak the JIT registration
 		return fail(err)
 	}
 	containerID, err := b.provider.Spawn(ctx, index, name, cpuset, jit.EncodedJITConfig)
 	if err != nil {
+		b.removeRunnerRegistration(ctx, name)
 		b.setDockerDown(b.provider.Ping(ctx) != nil)
 		return fail(err)
 	}
@@ -150,66 +176,117 @@ func (b *Broker) spawnOne(ctx context.Context) bool {
 		sl.Since = time.Now()
 	})
 	b.event(bus.Info, index, fmt.Sprintf("runner %s up (waiting for a job)", name))
-	go b.watchContainer(index, name, containerID)
+	b.armWatcher(index, name, containerID)
 	return true
+}
+
+// removeRunnerRegistration best-effort deletes a runner's GitHub registration
+// by name. Tolerates the (nil, nil) not-found contract of GetRunnerByName.
+func (b *Broker) removeRunnerRegistration(ctx context.Context, runnerName string) {
+	ref, err := b.gh.GetRunnerByName(ctx, runnerName)
+	if err != nil || ref == nil {
+		return
+	}
+	_ = b.gh.RemoveRunner(ctx, int64(ref.ID))
 }
 
 // retryErroredSlots returns slots that failed a spawn back to idle after a
 // cooldown, so capacity self-heals instead of pinning at error forever.
 func (b *Broker) retryErroredSlots() {
 	for _, s := range b.slots.Snapshot() {
-		if s.State == slots.Errored && time.Since(s.Since) > 30*time.Second {
-			b.slots.Free(s.Index, s.RunnerName)
+		if s.State == slots.Errored && time.Since(s.Since) > b.tm.erroredCooldown {
+			b.slots.FreeErrored(s.Index)
 		}
 	}
 }
 
-// cullIdle removes up to n jobless runners (oldest first): their containers
-// are stopped and their still-unused registrations removed from GitHub.
+// cullIdle removes up to n jobless runners, oldest first.
 func (b *Broker) cullIdle(ctx context.Context, n int) {
-	for _, s := range b.slots.IdleRunners() {
-		if n <= 0 {
-			return
-		}
-		if b.provider.HasWorker(ctx, s.ContainerID) {
-			continue // a job just landed; not idle after all
+	idle := b.slots.IdleRunners()
+	if len(idle) > n {
+		idle = idle[:n]
+	}
+	b.cullSlots(ctx, idle, "excess idle")
+}
+
+// cullSlots removes the given jobless runners: container stopped and the
+// still-unused GitHub registration deleted. A runner that turns out to be
+// mid-job — or whose worker probe FAILS — is skipped: an unanswerable probe
+// never licenses killing a container.
+func (b *Broker) cullSlots(ctx context.Context, list []slots.Slot, reason string) {
+	for _, s := range list {
+		hasWorker, err := b.provider.HasWorker(ctx, s.ContainerID)
+		if hasWorker || err != nil {
+			continue
 		}
 		if err := b.provider.Remove(ctx, s.ContainerID); err != nil {
 			b.event(bus.Warn, s.Index, fmt.Sprintf("cull failed: %v", err))
 			continue
 		}
-		if ref, err := b.client.GetRunnerByName(ctx, s.RunnerName); err == nil {
-			_ = b.client.RemoveRunner(ctx, int64(ref.ID))
+		b.removeRunnerRegistration(ctx, s.RunnerName)
+		if b.slots.Free(s.Index, s.RunnerName) {
+			b.event(bus.Info, s.Index, fmt.Sprintf("culled %s runner %s", reason, s.RunnerName))
 		}
-		b.slots.Free(s.Index, s.RunnerName)
-		b.event(bus.Info, s.Index, fmt.Sprintf("culled idle runner %s", s.RunnerName))
-		n--
 	}
+}
+
+// armWatcher registers and starts the container-exit watcher exactly once per
+// container.
+func (b *Broker) armWatcher(index int, runnerName, containerID string) {
+	b.mu.Lock()
+	if _, exists := b.watched[containerID]; exists {
+		b.mu.Unlock()
+		return
+	}
+	b.watched[containerID] = struct{}{}
+	ctx := b.runCtx
+	b.mu.Unlock()
+	go b.watchContainer(ctx, index, runnerName, containerID)
+}
+
+func (b *Broker) unwatch(containerID string) {
+	b.mu.Lock()
+	delete(b.watched, containerID)
+	b.mu.Unlock()
 }
 
 // watchContainer notices a runner container exiting. A clean ephemeral exit
 // is normally followed by a JobCompleted message that does the accounting; if
 // none arrives within a grace window (daemon missed it, runner died early, or
-// it crashed mid-job) the watcher cleans up and surfaces the evidence.
-func (b *Broker) watchContainer(index int, runnerName, containerID string) {
-	ctx := context.Background()
+// it crashed mid-job) the watcher cleans up and surfaces the evidence. A Wait
+// failure (docker outage) just ends the watcher — reconcile re-arms or frees
+// the slot once docker answers again.
+func (b *Broker) watchContainer(ctx context.Context, index int, runnerName, containerID string) {
+	defer b.unwatch(containerID)
 	exitCode, err := b.provider.Wait(ctx, containerID)
 	if err != nil {
-		return // daemon shutting down or docker gone; adoption will reconcile
+		return
 	}
 
-	deadline := time.Now().Add(90 * time.Second)
-	for time.Now().Before(deadline) {
+	deadline := time.NewTimer(b.tm.watchGrace)
+	defer deadline.Stop()
+	poll := time.NewTicker(b.tm.watchPoll)
+	defer poll.Stop()
+	for {
 		if !b.ownsSlot(index, runnerName) {
 			return // JobCompleted already accounted for it
 		}
-		time.Sleep(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			return
+		case <-deadline.C:
+			b.reapUnreported(ctx, index, runnerName, containerID, exitCode)
+			return
+		case <-poll.C:
+		}
 	}
+}
 
+func (b *Broker) reapUnreported(ctx context.Context, index int, runnerName, containerID string, exitCode int64) {
 	logs, _ := b.provider.LogsTail(ctx, containerID, 50)
 	_ = b.provider.Remove(ctx, containerID)
 	if b.slots.Free(index, runnerName) {
-		b.counters.Failed.Add(1)
+		b.counters.failed.Add(1)
 		msg := fmt.Sprintf("runner %s exited (code %d) without a job-completed report", runnerName, exitCode)
 		if exitCode == 137 {
 			msg += " — killed (OOM?)"
@@ -223,11 +300,8 @@ func (b *Broker) watchContainer(index int, runnerName, containerID string) {
 }
 
 func (b *Broker) ownsSlot(index int, runnerName string) bool {
-	owns := false
-	b.slots.MutateIndex(index, func(sl *slots.Slot) {
-		owns = sl.RunnerName == runnerName
-	})
-	return owns
+	s, ok := b.slots.Get(index)
+	return ok && runnerName != "" && s.RunnerName == runnerName
 }
 
 func tailLines(s string, n int) string {
@@ -235,5 +309,5 @@ func tailLines(s string, n int) string {
 	if len(lines) > n {
 		lines = lines[len(lines)-n:]
 	}
-	return strings.Join(lines, " | ")
+	return bus.Sanitize(strings.Join(lines, " | "))
 }

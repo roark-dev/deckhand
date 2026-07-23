@@ -6,6 +6,7 @@ package slots
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 )
@@ -47,9 +48,9 @@ type Slot struct {
 	Job         *Job      `json:"job,omitempty"`
 	Err         string    `json:"error,omitempty"`
 	Since       time.Time `json:"since"`
-	// draining marks a slot above target; it is removed once it returns to
-	// idle instead of becoming free capacity again.
-	draining bool
+	// Drain marks a slot above target; it is removed once it returns to idle
+	// instead of becoming free capacity again.
+	Drain bool `json:"drain,omitempty"`
 }
 
 func (s *Slot) busy() bool {
@@ -58,6 +59,17 @@ func (s *Slot) busy() bool {
 		return true
 	}
 	return false
+}
+
+// clone deep-copies a slot so snapshots never share the Job pointer with the
+// live table.
+func (s *Slot) clone() Slot {
+	out := *s
+	if s.Job != nil {
+		job := *s.Job
+		out.Job = &job
+	}
+	return out
 }
 
 // Manager holds the slot table and the target count.
@@ -90,7 +102,8 @@ func (m *Manager) cpuset(index int) string {
 // immediately (and un-drains any slot that was on its way out). Shrinking
 // removes idle slots at the top immediately and marks busy ones draining —
 // they finish their current job and then vanish; a mid-job runner is never
-// killed.
+// killed here (jobless drained runners are culled by the broker via
+// DrainingReady).
 func (m *Manager) SetTarget(n int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -99,14 +112,14 @@ func (m *Manager) SetTarget(n int) {
 		m.slots = append(m.slots, &Slot{Index: i, State: Idle, Cpuset: m.cpuset(i), Since: time.Now()})
 	}
 	for _, s := range m.slots {
-		if s.Index < n && s.draining {
-			s.draining = false
+		if s.Index < n && s.Drain {
+			s.Drain = false
 			if s.State == Draining {
 				s.State = Idle
 			}
 		}
 		if s.Index >= n {
-			s.draining = true
+			s.Drain = true
 			if s.State == Idle {
 				s.State = Draining
 			}
@@ -132,15 +145,17 @@ func (m *Manager) Target() int {
 	return m.target
 }
 
-// Acquire reserves the lowest idle, non-draining slot for a spawn and returns
-// its index, cpuset and false if none is free.
-func (m *Manager) Acquire(runnerName string) (index int, cpuset string, ok bool) {
+// Acquire reserves the lowest idle, non-draining slot for a spawn. The caller
+// must set the runner name via SetRunnerName once minted (the name embeds the
+// slot index, so it cannot exist before the slot is chosen).
+func (m *Manager) Acquire() (index int, cpuset string, ok bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, s := range m.slots {
-		if s.State == Idle && !s.draining {
+		if s.State == Idle && !s.Drain {
 			s.State = Starting
-			s.RunnerName = runnerName
+			s.RunnerName = ""
+			s.ContainerID = ""
 			s.Job = nil
 			s.Err = ""
 			s.Since = time.Now()
@@ -150,10 +165,19 @@ func (m *Manager) Acquire(runnerName string) (index int, cpuset string, ok bool)
 	return 0, "", false
 }
 
+// SetRunnerName names a freshly acquired slot.
+func (m *Manager) SetRunnerName(index int, runnerName string) {
+	m.MutateIndex(index, func(s *Slot) { s.RunnerName = runnerName })
+}
+
 // Free returns a slot to idle (or removes it if draining). It is a no-op
-// unless runnerName still owns the slot — this is what makes the two cleanup
-// paths (JobCompleted message vs container-exit watcher) race-safe.
+// unless runnerName is non-empty and still owns the slot — this is what makes
+// the two cleanup paths (JobCompleted message vs container-exit watcher)
+// race-safe.
 func (m *Manager) Free(index int, runnerName string) bool {
+	if runnerName == "" {
+		return false
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	s := m.getLocked(index)
@@ -165,7 +189,29 @@ func (m *Manager) Free(index int, runnerName string) bool {
 	s.Job = nil
 	s.Err = ""
 	s.Since = time.Now()
-	if s.draining {
+	if s.Drain {
+		s.State = Draining
+	} else {
+		s.State = Idle
+	}
+	m.compactLocked()
+	return true
+}
+
+// FreeErrored returns an Errored slot (which owns no runner) to idle.
+func (m *Manager) FreeErrored(index int) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s := m.getLocked(index)
+	if s == nil || s.State != Errored {
+		return false
+	}
+	s.RunnerName = ""
+	s.ContainerID = ""
+	s.Job = nil
+	s.Err = ""
+	s.Since = time.Now()
+	if s.Drain {
 		s.State = Draining
 	} else {
 		s.State = Idle
@@ -175,11 +221,15 @@ func (m *Manager) Free(index int, runnerName string) bool {
 }
 
 // Mutate runs fn against the slot currently owned by runnerName, if any.
+// Returns false (without calling fn) when no slot is owned by that name.
 func (m *Manager) Mutate(runnerName string, fn func(*Slot)) bool {
+	if runnerName == "" {
+		return false
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, s := range m.slots {
-		if s.RunnerName == runnerName && s.RunnerName != "" {
+		if s.RunnerName == runnerName {
 			fn(s)
 			return true
 		}
@@ -199,29 +249,44 @@ func (m *Manager) MutateIndex(index int, fn func(*Slot)) bool {
 	return true
 }
 
-// AdoptAt places an adopted (pre-existing) container into a specific slot,
-// growing the table if the daemon restarted with a smaller target; slots
-// beyond the target drain away once their job finishes.
-func (m *Manager) AdoptAt(index int, runnerName, containerID string, running bool) {
+// Adopt places an adopted (pre-existing) container into the slot table,
+// preferring its labeled index. If that index is occupied by a DIFFERENT live
+// runner (label collision after a failed remove + restart), the container is
+// adopted at a fresh appended index instead — tracking beats cpuset affinity.
+// Returns the index actually used. Slots beyond the target drain away once
+// their job finishes.
+func (m *Manager) Adopt(index int, runnerName, containerID string, running bool) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for len(m.slots) <= index {
-		i := len(m.slots)
-		s := &Slot{Index: i, State: Idle, Cpuset: m.cpuset(i), Since: time.Now()}
-		if i >= m.target {
-			s.draining = true
-			s.State = Draining
-		}
-		m.slots = append(m.slots, s)
-	}
+	m.growLocked(index)
 	s := m.slots[index]
+	if s.busy() && s.RunnerName != runnerName {
+		index = len(m.slots)
+		m.growLocked(index)
+		s = m.slots[index]
+	}
 	s.RunnerName = runnerName
 	s.ContainerID = containerID
+	s.Job = nil
+	s.Err = ""
 	s.Since = time.Now()
 	if running {
 		s.State = Running
 	} else {
 		s.State = Ready
+	}
+	return index
+}
+
+func (m *Manager) growLocked(index int) {
+	for len(m.slots) <= index {
+		i := len(m.slots)
+		s := &Slot{Index: i, State: Idle, Cpuset: m.cpuset(i), Since: time.Now()}
+		if i >= m.target {
+			s.Drain = true
+			s.State = Draining
+		}
+		m.slots = append(m.slots, s)
 	}
 }
 
@@ -230,6 +295,17 @@ func (m *Manager) getLocked(index int) *Slot {
 		return nil
 	}
 	return m.slots[index]
+}
+
+// Get returns a deep copy of one slot.
+func (m *Manager) Get(index int) (Slot, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s := m.getLocked(index)
+	if s == nil {
+		return Slot{}, false
+	}
+	return s.clone(), true
 }
 
 // Live counts runners that exist or are being created (Starting/Ready/Running).
@@ -252,7 +328,7 @@ func (m *Manager) FreeCount() int {
 	defer m.mu.Unlock()
 	n := 0
 	for _, s := range m.slots {
-		if s.State == Idle && !s.draining {
+		if s.State == Idle && !s.Drain {
 			n++
 		}
 	}
@@ -280,19 +356,35 @@ func (m *Manager) IdleRunners() []Slot {
 	var out []Slot
 	for _, s := range m.slots {
 		if s.State == Ready {
-			out = append(out, *s)
+			out = append(out, s.clone())
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Since.Before(out[j].Since) })
+	return out
+}
+
+// DrainingReady returns Ready slots marked for drain — jobless runners that
+// should be culled proactively so scale-down converges without waiting for
+// GitHub to route them a job.
+func (m *Manager) DrainingReady() []Slot {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []Slot
+	for _, s := range m.slots {
+		if s.State == Ready && s.Drain {
+			out = append(out, s.clone())
 		}
 	}
 	return out
 }
 
-// Snapshot returns a copy of the slot table for display/serialization.
+// Snapshot returns a deep copy of the slot table for display/serialization.
 func (m *Manager) Snapshot() []Slot {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]Slot, 0, len(m.slots))
 	for _, s := range m.slots {
-		out = append(out, *s)
+		out = append(out, s.clone())
 	}
 	return out
 }

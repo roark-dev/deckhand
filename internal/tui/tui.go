@@ -30,6 +30,7 @@ var (
 
 type model struct {
 	client  *control.Client
+	ctx     context.Context
 	status  *broker.Status
 	err     error
 	events  []bus.Event
@@ -42,8 +43,10 @@ type statusMsg struct {
 	st  *broker.Status
 	err error
 }
+type actionErrMsg struct{ err error }
 type eventMsg bus.Event
 type eventsClosedMsg struct{}
+type eventsConnectedMsg struct{ ch <-chan bus.Event }
 type tickMsg time.Time
 
 // Run starts the dashboard; it returns when the user quits.
@@ -51,17 +54,14 @@ func Run(socketPath string) error {
 	c := control.NewClient(socketPath)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	m := model{client: c}
-	if ch, err := c.Events(ctx); err == nil {
-		m.eventCh = ch
-	}
+	m := model{client: c, ctx: ctx}
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err := p.Run()
 	return err
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(m.fetchStatus, m.waitEvent, tick())
+	return tea.Batch(m.fetchStatus, m.connectEvents, tick())
 }
 
 func tick() tea.Cmd {
@@ -69,10 +69,20 @@ func tick() tea.Cmd {
 }
 
 func (m model) fetchStatus() tea.Msg {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(m.ctx, 2*time.Second)
 	defer cancel()
 	st, err := m.client.Status(ctx)
 	return statusMsg{st, err}
+}
+
+// connectEvents (re)opens the event stream; on failure or closure the Update
+// loop schedules a retry, so a daemon restart doesn't leave a dead pane.
+func (m model) connectEvents() tea.Msg {
+	ch, err := m.client.Events(m.ctx)
+	if err != nil {
+		return eventsClosedMsg{}
+	}
+	return eventsConnectedMsg{ch: ch}
 }
 
 func (m model) waitEvent() tea.Msg {
@@ -86,12 +96,20 @@ func (m model) waitEvent() tea.Msg {
 	return eventMsg(ev)
 }
 
+func retryEventsLater() tea.Cmd {
+	return tea.Tick(2*time.Second, func(time.Time) tea.Msg { return retryEventsMsg{} })
+}
+
+type retryEventsMsg struct{}
+
+// post runs a control action; a failure surfaces as an error banner without
+// touching the currently displayed status (the next tick refreshes it).
 func (m model) post(f func(context.Context) error) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(m.ctx, 5*time.Second)
 		defer cancel()
 		if err := f(ctx); err != nil {
-			return statusMsg{m.status, err}
+			return actionErrMsg{err}
 		}
 		return m.fetchStatus()
 	}
@@ -105,8 +123,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		return m, tea.Batch(m.fetchStatus, tick())
 	case statusMsg:
-		m.status, m.err = msg.st, msg.err
+		if msg.st != nil || msg.err != nil {
+			m.status, m.err = msg.st, msg.err
+			if msg.st != nil && msg.err == nil {
+				m.err = nil
+			}
+		}
 		return m, nil
+	case actionErrMsg:
+		m.err = msg.err
+		return m, nil
+	case eventsConnectedMsg:
+		m.eventCh = msg.ch
+		return m, m.waitEvent
 	case eventMsg:
 		m.events = append(m.events, bus.Event(msg))
 		if len(m.events) > 200 {
@@ -114,7 +143,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.waitEvent
 	case eventsClosedMsg:
-		return m, nil
+		m.eventCh = nil
+		return m, retryEventsLater()
+	case retryEventsMsg:
+		return m, m.connectEvents
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -125,14 +157,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
 	if m.confirm != "" {
-		defer func() {}()
 		confirm := m.confirm
 		m.confirm = ""
-		if key == "y" {
-			switch confirm {
-			case "stop":
-				return m, m.post(func(ctx context.Context) error { return m.client.Stop(ctx, "drain", false) })
-			}
+		if key == "y" && confirm == "stop" {
+			return m, m.post(func(ctx context.Context) error { return m.client.Stop(ctx, "drain", false) })
 		}
 		return m, nil
 	}
@@ -182,20 +210,23 @@ func (m model) View() string {
 	// Header
 	state := okStyle.Render(string(br.State))
 	switch br.State {
-	case broker.Degraded:
+	case broker.Degraded, broker.Starting:
 		state = warnStyle.Render(string(br.State))
-	case broker.Draining, broker.Stopped:
+	case broker.Stopped:
 		state = errStyle.Render(string(br.State))
 	}
 	chips := []string{state}
 	if br.Paused {
 		chips = append(chips, warnStyle.Render("PAUSED"))
 	}
+	if br.Draining {
+		chips = append(chips, warnStyle.Render("DRAINING"))
+	}
 	if !st.Docker.OK {
 		chips = append(chips, errStyle.Render("DOCKER DOWN"))
 	}
 	if m.err != nil {
-		chips = append(chips, errStyle.Render(m.err.Error()))
+		chips = append(chips, errStyle.Render(truncate(m.err.Error(), 60)))
 	}
 	fmt.Fprintf(&b, "%s  %s\n", titleStyle.Render("deckhand"), strings.Join(chips, "  "))
 	fmt.Fprintf(&b, "%s\n\n", dimStyle.Render(fmt.Sprintf("scale set %q on %s — session %s", br.ScaleSetName, br.GitHubURL, ageOrDash(br.SessionAgeSec))))
@@ -256,7 +287,7 @@ func renderSlot(s slots.Slot) (string, string) {
 	case slots.Running:
 		detail := ""
 		if s.Job != nil {
-			detail = fmt.Sprintf("%s  %s", s.Job.DisplayName, dimStyle.Render(s.Job.Repo))
+			detail = fmt.Sprintf("%s  %s", sanitizeCell(s.Job.DisplayName), dimStyle.Render(sanitizeCell(s.Job.Repo)))
 		}
 		return busyStyle.Render("busy"), detail
 	case slots.Ready:
@@ -281,12 +312,22 @@ func ageOrDash(sec int) string {
 	return (time.Duration(sec) * time.Second).Round(time.Second).String()
 }
 
+// sanitizeCell guards the render path against control characters even though
+// producers sanitize at the source (defense in depth for fields that arrive
+// via the status JSON rather than the event bus).
+func sanitizeCell(s string) string {
+	return bus.Sanitize(s)
+}
+
+// truncate is rune-aware so multibyte job names never render as mojibake.
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	s = bus.Sanitize(s)
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
 	if n <= 1 {
 		return "…"
 	}
-	return s[:n-1] + "…"
+	return string(r[:n-1]) + "…"
 }

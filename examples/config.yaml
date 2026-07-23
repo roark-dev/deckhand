@@ -58,6 +58,14 @@ runner:
   expose_docker_socket: false
   # Extra env for job containers (never secrets).
   env: {}
+  # Memory cap per job container in MiB. 0 = unlimited (default). Set this on
+  # shared hosts so one job cannot OOM the docker VM and its sibling jobs
+  # (e.g. 4096 for 4 GiB per slot).
+  memory_mb: 0
+  # Process cap per job container (fork-bomb protection). Default 2048;
+  # -1 = explicitly unlimited. Containers also always run with
+  # no-new-privileges.
+  pids_limit: 2048
 
 metrics:
   # Optional Prometheus text endpoint. Empty = disabled.

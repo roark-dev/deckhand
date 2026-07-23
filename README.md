@@ -85,7 +85,9 @@ slots:
   warm: 0         # keep N runners pre-registered for instant job pickup
   cpus_per_slot: 2 # optional cpuset pinning (0 = off)
 runner:
-  image: ghcr.io/actions/actions-runner:latest  # pin a digest for reproducibility
+  image: ghcr.io/actions/actions-runner:latest  # pin a digest! (daemon + doctor warn on tags)
+  memory_mb: 4096   # per-job memory cap (0 = unlimited)
+  pids_limit: 2048  # per-job process cap (fork-bomb protection)
 metrics:
   listen: 127.0.0.1:9642   # optional Prometheus endpoint
 ```
@@ -119,14 +121,24 @@ Self-hosted runners execute whatever code lands in your workflows. Baseline
 rules, enforced or defaulted by deckhand:
 
 - Job containers get **no host mounts** and no credentials beyond their
-  single-job JIT config. `runner.expose_docker_socket` exists for
-  docker-in-workflow needs but hands job code root-equivalent control of the
-  docker host — leave it off unless you need it and trust every workflow.
+  single-job JIT config. They run with `no-new-privileges`, a pids limit
+  (default 2048) and an optional memory cap (`runner.memory_mb`).
+  `runner.expose_docker_socket` exists for docker-in-workflow needs but hands
+  job code root-equivalent control of the docker host — leave it off unless
+  you need it and trust every workflow.
+- Workflow-controlled text (job names, logs) is stripped of terminal escape
+  sequences before it reaches your terminal, the event stream, or the log.
+- The control socket is owner-only from creation and every connection's peer
+  uid is verified (`SO_PEERCRED`/`LOCAL_PEERCRED`).
+- Pin `runner.image` by digest (`image@sha256:...`) — a mutable tag is a
+  supply-chain risk; the daemon and `deckhand doctor` warn if you don't.
 - **Never** attach deckhand to a public repo that accepts fork PRs; fork code
   would execute on your machine.
 - On macOS + Colima, keep the VM's mounts restricted (`templates/colima.yaml`)
   so container escapes via an exposed docker socket can't reach `~/.aws`,
   `~/.ssh`, etc. `deckhand doctor` checks this posture.
+- Put the GitHub credential in `token_file` (0600) rather than env vars when
+  running under launchd/systemd — see the comments in `templates/`.
 
 ## Operations
 

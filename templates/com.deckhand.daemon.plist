@@ -1,13 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- launchd template: run the deckhand daemon at login on macOS.
 
-     1. Edit the deckhand path and (if using token_env auth) the token below.
-        Note launchd env vars are visible via `launchctl print`; token_file
-        auth in config.yaml avoids putting the secret here at all.
+     SECURITY: do NOT put your GitHub token in this file. LaunchAgent plists
+     are typically world-readable (0644), and `launchctl print` also exposes
+     environment variables. Use token_file auth in config.yaml instead:
+
+       github:
+         auth:
+           token_file: /Users/YOU/.deckhand/token   # chmod 600
+
+     Setup:
+     1. Edit the deckhand path below (`which deckhand`).
      2. cp com.deckhand.daemon.plist ~/Library/LaunchAgents/
+        chmod 600 ~/Library/LaunchAgents/com.deckhand.daemon.plist
      3. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.deckhand.daemon.plist
 
-     Logs land in ~/.deckhand/daemon.log (plus launchd's stdout path below).
+     Logs land in ~/.deckhand/daemon.log (0600); launchd's own capture below
+     also stays inside ~/.deckhand rather than world-readable /tmp.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -19,12 +28,6 @@
     <string>/opt/homebrew/bin/deckhand</string>
     <string>up</string>
   </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <!-- Only needed for token_env auth; prefer token_file in config.yaml. -->
-    <key>DECKHAND_GITHUB_TOKEN</key>
-    <string>REPLACE_ME_OR_DELETE_THIS_DICT</string>
-  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -33,8 +36,8 @@
     <false/>
   </dict>
   <key>StandardOutPath</key>
-  <string>/tmp/deckhand.launchd.log</string>
+  <string>/Users/REPLACE_ME/.deckhand/launchd.log</string>
   <key>StandardErrorPath</key>
-  <string>/tmp/deckhand.launchd.log</string>
+  <string>/Users/REPLACE_ME/.deckhand/launchd.log</string>
 </dict>
 </plist>

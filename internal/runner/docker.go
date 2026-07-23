@@ -34,6 +34,8 @@ type Provider struct {
 	// (root-equivalent on the docker host; off unless configured).
 	exposeDockerSocket bool
 	extraEnv           []string
+	memoryBytes        int64
+	pidsLimit          int64
 }
 
 type Options struct {
@@ -41,6 +43,10 @@ type Options struct {
 	ScaleSetName       string
 	ExposeDockerSocket bool
 	Env                map[string]string
+	// MemoryBytes caps each job container's memory (0 = unlimited).
+	MemoryBytes int64
+	// PidsLimit caps processes per job container (0 = unlimited).
+	PidsLimit int64
 }
 
 func New(opts Options) (*Provider, error) {
@@ -58,6 +64,8 @@ func New(opts Options) (*Provider, error) {
 		scaleSet:           opts.ScaleSetName,
 		exposeDockerSocket: opts.ExposeDockerSocket,
 		extraEnv:           env,
+		memoryBytes:        opts.MemoryBytes,
+		pidsLimit:          opts.PidsLimit,
 	}, nil
 }
 
@@ -100,9 +108,20 @@ func (p *Provider) Spawn(ctx context.Context, slot int, runnerName, cpuset, jitC
 			LabelScaleSet:   p.scaleSet,
 		},
 	}
-	host := &container.HostConfig{}
+	host := &container.HostConfig{
+		// Job code must not escalate via setuid binaries; runners never need it.
+		SecurityOpt: []string{"no-new-privileges"},
+	}
 	if cpuset != "" {
 		host.Resources.CpusetCpus = cpuset
+	}
+	if p.memoryBytes > 0 {
+		host.Resources.Memory = p.memoryBytes
+		host.Resources.MemorySwap = p.memoryBytes // no extra swap beyond the cap
+	}
+	if p.pidsLimit > 0 {
+		limit := p.pidsLimit
+		host.Resources.PidsLimit = &limit
 	}
 	if p.exposeDockerSocket {
 		host.Binds = append(host.Binds, "/var/run/docker.sock:/var/run/docker.sock")
@@ -141,21 +160,38 @@ func (p *Provider) Remove(ctx context.Context, containerID string) error {
 	return err
 }
 
+// Exists reports whether the container is known to docker (running or not).
+func (p *Provider) Exists(ctx context.Context, containerID string) (bool, error) {
+	_, err := p.cli.ContainerInspect(ctx, containerID)
+	if err == nil {
+		return true, nil
+	}
+	if dockerclient.IsErrNotFound(err) {
+		return false, nil
+	}
+	return false, err
+}
+
 // HasWorker reports whether a Runner.Worker process (an executing job) is
-// alive inside the container.
-func (p *Provider) HasWorker(ctx context.Context, containerID string) bool {
+// alive inside the container. The error return matters: callers deciding
+// whether it is safe to remove a container MUST treat an error as "assume a
+// worker is alive" — a probe failure must never license killing a job.
+func (p *Provider) HasWorker(ctx context.Context, containerID string) (bool, error) {
 	top, err := p.cli.ContainerTop(ctx, containerID, nil)
 	if err != nil {
-		return false
+		if dockerclient.IsErrNotFound(err) {
+			return false, nil // no container, definitively no worker
+		}
+		return false, err
 	}
 	for _, proc := range top.Processes {
 		for _, field := range proc {
 			if strings.Contains(field, "Runner.Worker") {
-				return true
+				return true, nil
 			}
 		}
 	}
-	return false
+	return false, nil
 }
 
 // LogsTail returns the last n lines of a container's output (demuxed).
@@ -174,13 +210,12 @@ func (p *Provider) LogsTail(ctx context.Context, containerID string, n int) (str
 	return buf.String(), nil
 }
 
-// Managed describes an adopted container.
+// Managed describes a container found via labels.
 type Managed struct {
 	ContainerID string
 	Slot        int
 	RunnerName  string
 	Running     bool
-	HasWorker   bool
 }
 
 // ListManaged finds all deckhand containers for this scale set, running or
@@ -200,16 +235,12 @@ func (p *Provider) ListManaged(ctx context.Context) ([]Managed, error) {
 		if err != nil {
 			continue
 		}
-		m := Managed{
+		out = append(out, Managed{
 			ContainerID: c.ID,
 			Slot:        slot,
 			RunnerName:  c.Labels[LabelRunnerName],
 			Running:     c.State == container.StateRunning,
-		}
-		if m.Running {
-			m.HasWorker = p.HasWorker(ctx, c.ID)
-		}
-		out = append(out, m)
+		})
 	}
 	return out, nil
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,6 +17,10 @@ import (
 	"github.com/roark-dev/deckhand/internal/control"
 	"github.com/roark-dev/deckhand/internal/metrics"
 )
+
+// maxLogSize triggers a one-shot rotation to daemon.log.old at startup so an
+// unattended daemon can't grow the log without bound.
+const maxLogSize = 10 << 20
 
 var (
 	flagTakeover bool
@@ -41,6 +46,11 @@ systemd for background operation (templates/ in the repo).`,
 		if err := os.MkdirAll(paths.Home, 0o700); err != nil {
 			return err
 		}
+		// MkdirAll does not tighten a pre-existing directory; the state dir
+		// guards the control socket and credentials, so enforce the mode.
+		if err := os.Chmod(paths.Home, 0o700); err != nil {
+			return err
+		}
 
 		// Single-instance lock: one daemon per state dir, which also keeps us
 		// to GitHub's one-message-session-per-scale-set constraint.
@@ -50,21 +60,13 @@ systemd for background operation (templates/ in the repo).`,
 		}
 		defer lock.Close()
 		if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-			return fmt.Errorf("another deckhand daemon is already running (lock %s held)", paths.LockFile)
+			if errors.Is(err, unix.EWOULDBLOCK) {
+				return fmt.Errorf("another deckhand daemon is already running (lock %s held)", paths.LockFile)
+			}
+			return fmt.Errorf("acquire daemon lock %s: %w", paths.LockFile, err)
 		}
 
-		var logW io.Writer = os.Stderr
-		if f, err := os.OpenFile(paths.LogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
-			defer f.Close()
-			logW = io.MultiWriter(os.Stderr, f)
-		}
-		var handler slog.Handler
-		if flagLogJSON {
-			handler = slog.NewJSONHandler(logW, nil)
-		} else {
-			handler = slog.NewTextHandler(logW, nil)
-		}
-		logger := slog.New(handler)
+		logger := newLogger()
 
 		eventBus := bus.New()
 		b, err := broker.New(cfg, paths, logger, eventBus, flagTakeover)
@@ -82,7 +84,10 @@ systemd for background operation (templates/ in the repo).`,
 		ctl := control.NewServer(b, eventBus, version, shutdown)
 		go func() {
 			if err := ctl.Serve(ctx, paths.Socket); err != nil {
+				// A daemon nobody can inspect or stop is worse than no
+				// daemon: treat control-plane failure as fatal.
 				logger.Error("control server failed", "error", err)
+				shutdown("control server failed")
 			}
 		}()
 		if cfg.Metrics.Listen != "" {
@@ -97,4 +102,20 @@ systemd for background operation (templates/ in the repo).`,
 		fmt.Fprintf(os.Stderr, "dashboard: `deckhand dash` (in another terminal)\n")
 		return b.Run(ctx)
 	},
+}
+
+func newLogger() *slog.Logger {
+	var logW io.Writer = os.Stderr
+	if info, err := os.Stat(paths.LogFile); err == nil && info.Size() > maxLogSize {
+		_ = os.Rename(paths.LogFile, paths.LogFile+".old")
+	}
+	if f, err := os.OpenFile(paths.LogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
+		logW = io.MultiWriter(os.Stderr, f)
+	} else {
+		fmt.Fprintf(os.Stderr, "warning: cannot open %s (%v) — logging to stderr only\n", paths.LogFile, err)
+	}
+	if flagLogJSON {
+		return slog.New(slog.NewJSONHandler(logW, nil))
+	}
+	return slog.New(slog.NewTextHandler(logW, nil))
 }

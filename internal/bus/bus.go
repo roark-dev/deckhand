@@ -4,6 +4,7 @@
 package bus
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -25,6 +26,20 @@ type Event struct {
 	Slot int `json:"slot"`
 }
 
+// Sanitize strips control characters — including the ESC/CSI/OSC introducers
+// used for terminal escape injection — from untrusted text before it reaches
+// a terminal, a log file, or the event stream. Workflow-controlled strings
+// (job names, repo names, container logs) MUST pass through this before
+// display.
+func Sanitize(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
 const ringSize = 200
 
 type Bus struct {
@@ -38,7 +53,9 @@ func New() *Bus {
 }
 
 func (b *Bus) Publish(level Level, slot int, msg string) {
-	ev := Event{Time: time.Now(), Level: level, Msg: msg, Slot: slot}
+	// Defense in depth: producers sanitize workflow-controlled fields at the
+	// source, but nothing control-character-laden may enter the feed at all.
+	ev := Event{Time: time.Now(), Level: level, Msg: Sanitize(msg), Slot: slot}
 	b.mu.Lock()
 	b.ring = append(b.ring, ev)
 	if len(b.ring) > ringSize {

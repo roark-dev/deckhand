@@ -3,7 +3,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -56,7 +58,7 @@ var versionCmd = &cobra.Command{
 
 func loadConfig() (*config.Config, error) {
 	cfg, err := config.Load(paths.ConfigFile)
-	if os.IsNotExist(err) {
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("no config at %s — run `deckhand init` first", paths.ConfigFile)
 	}
 	return cfg, err
