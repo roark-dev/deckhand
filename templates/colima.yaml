@@ -1,0 +1,26 @@
+# Hardened Colima profile for deckhand on macOS.
+#
+# Why this exists: Colima's DEFAULT profile mounts your whole $HOME into the
+# VM writable. If you ever set runner.expose_docker_socket (or a workflow
+# otherwise reaches the docker socket), job code controls dockerd — and with a
+# $HOME mount it can bind-mount ~/.aws, ~/.ssh, etc. and read your
+# credentials. Restricting the VM's mounts caps that blast radius: worst case
+# becomes bogus CI + VM-internal persistence, not stolen host credentials.
+#
+# Usage: copy relevant keys into ~/.colima/default/colima.yaml BEFORE
+# `colima start` (mounts cannot change on a running VM; `colima delete` +
+# start to apply). `deckhand doctor` checks this posture.
+#
+# Sizing: 4 concurrent 2-cpu job slots fit comfortably in 8cpu/16GiB.
+cpu: 8
+memory: 16
+disk: 40
+vmType: vz
+mountType: virtiofs
+
+# THE IMPORTANT PART: no $HOME mount. Deckhand itself needs no VM mounts at
+# all (job workdirs live inside the containers). List only paths your
+# workflows genuinely need, read-only wherever possible.
+mounts:
+  - location: /tmp/colima
+    writable: true

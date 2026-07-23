@@ -1,0 +1,64 @@
+# deckhand configuration reference — copy what you need to ~/.deckhand/config.yaml
+# (or point deckhand at another file with --config).
+
+github:
+  # Org URL (runners serve every repo the runner group allows) or a single
+  # repo URL.
+  url: https://github.com/me/repo
+
+  # Exactly ONE of the following auth methods.
+  auth:
+    # Recommended for workstations: read the token from an env var so the
+    # config file never holds a secret.
+    token_env: DECKHAND_GITHUB_TOKEN
+
+    # Or read it from a file (e.g. a keychain-backed path):
+    # token_file: /Users/me/.deckhand/token
+
+    # Or inline (the config file is chmod 600, but prefer the above):
+    # token: github_pat_...
+
+    # Or a GitHub App (best for long-lived installs; create the App with
+    # repo Administration read/write or org Self-hosted runners read/write):
+    # app:
+    #   client_id: Iv1.abc123
+    #   installation_id: 12345678
+    #   private_key_file: /Users/me/.deckhand/app.pem
+
+scale_set:
+  # The name workflows reference: `runs-on: deckhand`. Also the runner name
+  # prefix and the label.
+  name: deckhand
+  # Runner group (org-level scale sets; "default" otherwise).
+  runner_group: default
+  # Extra labels beyond the scale set name (github.com supports multi-label
+  # scale sets).
+  labels: []
+
+slots:
+  # Max concurrent jobs. Tunable at runtime with `deckhand scale N` — this
+  # value is the starting point; runtime changes persist across restarts.
+  count: 4
+  # Keep this many runners pre-registered and idle so jobs skip the
+  # container-boot wait. Costs idle RAM; 0 = spawn purely on demand.
+  warm: 0
+  # Pin each slot to a dedicated cpuset of this many CPUs (slot 0 → cpus 0-1,
+  # slot 1 → 2-3, ...). Bounds per-job parallelism/memory on shared boxes;
+  # 0 = no pinning.
+  cpus_per_slot: 0
+
+runner:
+  # Pin a digest for reproducible runners, e.g.
+  # ghcr.io/actions/actions-runner@sha256:...
+  image: ghcr.io/actions/actions-runner:latest
+  # DANGER: bind-mounts /var/run/docker.sock into every job container. Job
+  # code then controls the docker host (root-equivalent). Only for trusted
+  # workflows that need docker; pair with restricted VM mounts (see
+  # templates/colima.yaml).
+  expose_docker_socket: false
+  # Extra env for job containers (never secrets).
+  env: {}
+
+metrics:
+  # Optional Prometheus text endpoint. Empty = disabled.
+  # listen: 127.0.0.1:9642

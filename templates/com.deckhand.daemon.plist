@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- launchd template: run the deckhand daemon at login on macOS.
+
+     1. Edit the deckhand path and (if using token_env auth) the token below.
+        Note launchd env vars are visible via `launchctl print`; token_file
+        auth in config.yaml avoids putting the secret here at all.
+     2. cp com.deckhand.daemon.plist ~/Library/LaunchAgents/
+     3. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.deckhand.daemon.plist
+
+     Logs land in ~/.deckhand/daemon.log (plus launchd's stdout path below).
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.deckhand.daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/deckhand</string>
+    <string>up</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Only needed for token_env auth; prefer token_file in config.yaml. -->
+    <key>DECKHAND_GITHUB_TOKEN</key>
+    <string>REPLACE_ME_OR_DELETE_THIS_DICT</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/tmp/deckhand.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/deckhand.launchd.log</string>
+</dict>
+</plist>

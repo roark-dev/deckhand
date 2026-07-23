@@ -1,0 +1,15 @@
+version: 2
+project_name: deckhand
+builds:
+  - main: ./cmd/deckhand
+    env: [CGO_ENABLED=0]
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+archives:
+  - formats: [tar.gz]
+checksum:
+  name_template: checksums.txt
+release:
+  draft: true

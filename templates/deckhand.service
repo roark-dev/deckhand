@@ -1,0 +1,22 @@
+# systemd template: run the deckhand daemon on Linux.
+#
+#   1. Edit the paths/user below (and use token_file auth in config.yaml, or
+#      add an EnvironmentFile= holding DECKHAND_GITHUB_TOKEN).
+#   2. sudo cp deckhand.service /etc/systemd/system/
+#   3. sudo systemctl enable --now deckhand
+#
+[Unit]
+Description=deckhand — self-hosted GitHub Actions runner slots
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+User=runner
+ExecStart=/usr/local/bin/deckhand up
+Restart=always
+RestartSec=30
+# Uncomment for token_env auth; chmod 600 the file.
+# EnvironmentFile=/etc/deckhand/env
+
+[Install]
+WantedBy=multi-user.target
