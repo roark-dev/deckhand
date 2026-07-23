@@ -350,3 +350,18 @@ func TestConcurrentAccess(t *testing.T) {
 func name(i int) string {
 	return string(rune('a' + i))
 }
+
+func TestCapacityExcludesDrainingSlots(t *testing.T) {
+	m := NewManager(3, 0)
+	for i := range 3 {
+		idx := acquireNamed(t, m, name(i))
+		m.MutateIndex(idx, func(s *Slot) { s.State = Ready })
+	}
+	m.SetTarget(2) // slot 2 drains but its runner is still Ready
+	if got := m.Live(); got != 3 {
+		t.Fatalf("Live counts everything running: want 3, got %d", got)
+	}
+	if got := m.Capacity(); got != 2 {
+		t.Fatalf("Capacity must exclude draining slots: want 2, got %d", got)
+	}
+}

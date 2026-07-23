@@ -337,6 +337,27 @@ func (m *Manager) Live() int {
 	return n
 }
 
+// Capacity counts slots that should be advertised to GitHub: everything
+// usable that is NOT drain-marked. Draining runners still finish their work,
+// but advertising them invites GitHub to assign jobs to capacity that is on
+// its way out (and, for slots beyond the target, capacity that may be
+// unpinned — the contention the target exists to prevent).
+func (m *Manager) Capacity() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, s := range m.slots {
+		if s.Drain {
+			continue
+		}
+		switch s.State {
+		case Idle, Starting, Ready, Running:
+			n++
+		}
+	}
+	return n
+}
+
 // FreeCount is how many more runners could be spawned right now.
 func (m *Manager) FreeCount() int {
 	m.mu.Lock()

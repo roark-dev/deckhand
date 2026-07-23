@@ -710,7 +710,8 @@ func (b *Broker) isDraining() bool {
 
 // effectiveCap is what we advertise to GitHub as capacity: 0 while paused,
 // draining, or docker-down (never take jobs you can't run), else the count of
-// live plus spawnable runners.
+// usable non-draining slots — a drain-marked runner may still be finishing a
+// job, but advertising it invites new work onto capacity that is leaving.
 func (b *Broker) effectiveCap() int {
 	b.mu.Lock()
 	blocked := b.paused || b.draining || b.dockerDown
@@ -718,7 +719,7 @@ func (b *Broker) effectiveCap() int {
 	if blocked {
 		return 0
 	}
-	return b.slots.Live() + b.slots.FreeCount()
+	return b.slots.Capacity()
 }
 
 // poke pushes the current capacity to the live listener.
