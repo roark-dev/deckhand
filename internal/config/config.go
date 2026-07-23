@@ -110,6 +110,16 @@ type Runner struct {
 	// here is state one job can poison for later jobs on that slot — only
 	// use with trusted workflows, and `deckhand caches wipe` resets it.
 	CachePaths []string `yaml:"cache_paths,omitempty"`
+	// NoNewPrivileges (default true) blocks privilege escalation inside job
+	// containers. Set false only when workflows legitimately need the
+	// image's passwordless sudo (e.g. apt-get provisioning steps) —
+	// escalation then bounds at the container, not the host.
+	NoNewPrivileges *bool `yaml:"no_new_privileges,omitempty"`
+}
+
+// NoNewPrivilegesEnabled applies the default-true semantics.
+func (r Runner) NoNewPrivilegesEnabled() bool {
+	return r.NoNewPrivileges == nil || *r.NoNewPrivileges
 }
 
 // ToolCacheEnabled applies the default-true semantics of Runner.ToolCache.

@@ -38,6 +38,7 @@ type Provider struct {
 	pidsLimit          int64
 	toolCache          bool
 	cachePaths         []string
+	allowPrivEsc       bool
 }
 
 type Options struct {
@@ -53,6 +54,9 @@ type Options struct {
 	ToolCache bool
 	// CachePaths are additional absolute container paths persisted per slot.
 	CachePaths []string
+	// AllowPrivilegeEscalation drops the no-new-privileges flag so the
+	// image's sudo works (needed by workflows that apt-get provision tools).
+	AllowPrivilegeEscalation bool
 }
 
 func New(opts Options) (*Provider, error) {
@@ -80,6 +84,7 @@ func New(opts Options) (*Provider, error) {
 		pidsLimit:          opts.PidsLimit,
 		toolCache:          opts.ToolCache,
 		cachePaths:         opts.CachePaths,
+		allowPrivEsc:       opts.AllowPrivilegeEscalation,
 	}, nil
 }
 
@@ -134,9 +139,11 @@ func (p *Provider) Spawn(ctx context.Context, slot int, runnerName, cpuset, jitC
 			LabelScaleSet:   p.scaleSet,
 		},
 	}
-	host := &container.HostConfig{
-		// Job code must not escalate via setuid binaries; runners never need it.
-		SecurityOpt: []string{"no-new-privileges"},
+	host := &container.HostConfig{}
+	if !p.allowPrivEsc {
+		// Job code must not escalate via setuid binaries. Opt-out exists for
+		// workflows that need the image's sudo (apt-get provisioning).
+		host.SecurityOpt = []string{"no-new-privileges"}
 	}
 	if cpuset != "" {
 		host.Resources.CpusetCpus = cpuset

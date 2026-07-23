@@ -173,14 +173,15 @@ func New(cfg *config.Config, paths config.Paths, logger *slog.Logger, eventBus *
 		return nil, err
 	}
 	provider, err := runner.New(runner.Options{
-		Image:              cfg.Runner.Image,
-		ScaleSetName:       cfg.ScaleSet.Name,
-		ExposeDockerSocket: cfg.Runner.ExposeDockerSocket,
-		Env:                cfg.Runner.Env,
-		MemoryBytes:        int64(cfg.Runner.MemoryMB) << 20,
-		PidsLimit:          int64(cfg.Runner.PidsLimit),
-		ToolCache:          cfg.Runner.ToolCacheEnabled(),
-		CachePaths:         cfg.Runner.CachePaths,
+		Image:                    cfg.Runner.Image,
+		ScaleSetName:             cfg.ScaleSet.Name,
+		ExposeDockerSocket:       cfg.Runner.ExposeDockerSocket,
+		Env:                      cfg.Runner.Env,
+		MemoryBytes:              int64(cfg.Runner.MemoryMB) << 20,
+		PidsLimit:                int64(cfg.Runner.PidsLimit),
+		ToolCache:                cfg.Runner.ToolCacheEnabled(),
+		CachePaths:               cfg.Runner.CachePaths,
+		AllowPrivilegeEscalation: !cfg.Runner.NoNewPrivilegesEnabled(),
 	})
 	if err != nil {
 		return nil, err

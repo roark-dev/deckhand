@@ -311,3 +311,23 @@ runner:
 		t.Fatal("tool cache must default to enabled")
 	}
 }
+
+func TestNoNewPrivilegesDefaultAndOptOut(t *testing.T) {
+	cfg, err := Load(writeConfig(t, minimal))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Runner.NoNewPrivilegesEnabled() {
+		t.Fatal("no-new-privileges must default to enabled")
+	}
+	cfg, err = Load(writeConfig(t, minimal+`
+runner:
+  no_new_privileges: false
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Runner.NoNewPrivilegesEnabled() {
+		t.Fatal("explicit false must disable no-new-privileges")
+	}
+}
