@@ -24,6 +24,7 @@ floor_for() {
     internal/githubauth) echo 75 ;;
     internal/metrics) echo 60 ;;
     internal/slots) echo 90 ;;
+    internal/tui) echo 35 ;;
     *) echo "" ;;
   esac
 }

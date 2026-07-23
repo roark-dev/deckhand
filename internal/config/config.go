@@ -95,6 +95,22 @@ type Runner struct {
 	// PidsLimit caps processes per job container. Defaults to
 	// DefaultPidsLimit; -1 = unlimited (explicitly).
 	PidsLimit int `yaml:"pids_limit"`
+	// ToolCache persists the actions/setup-* toolchain cache
+	// (RUNNER_TOOL_CACHE) in a per-slot volume so job #2 hits "Found in
+	// cache" instead of re-downloading toolchains forever — the wiped
+	// workspace otherwise silently destroys it every job. Default true;
+	// set false to disable persistence entirely.
+	ToolCache *bool `yaml:"tool_cache,omitempty"`
+	// CachePaths persists additional absolute container paths across jobs in
+	// per-slot volumes (e.g. /home/runner/.npm). SECURITY: anything listed
+	// here is state one job can poison for later jobs on that slot — only
+	// use with trusted workflows, and `deckhand caches wipe` resets it.
+	CachePaths []string `yaml:"cache_paths,omitempty"`
+}
+
+// ToolCacheEnabled applies the default-true semantics of Runner.ToolCache.
+func (r Runner) ToolCacheEnabled() bool {
+	return r.ToolCache == nil || *r.ToolCache
 }
 
 type Metrics struct {
@@ -206,6 +222,11 @@ func (c *Config) Validate() error {
 	}
 	if c.Runner.MemoryMB < 0 {
 		return errors.New("runner.memory_mb cannot be negative")
+	}
+	for _, p := range c.Runner.CachePaths {
+		if !strings.HasPrefix(p, "/") {
+			return fmt.Errorf("runner.cache_paths entry %q must be an absolute container path", p)
+		}
 	}
 	if c.Slots.Warm < 0 || c.Slots.Warm > c.Slots.Count {
 		return fmt.Errorf("slots.warm %d must be within 0..slots.count", c.Slots.Warm)

@@ -24,8 +24,15 @@ func TestLaunchdPlist(t *testing.T) {
 			t.Errorf("plist missing %q", want)
 		}
 	}
-	if strings.Contains(out, "EnvironmentVariables") {
-		t.Error("generated plist must never carry credentials/env vars")
+	// PATH is deliberately set (launchd's default misses Homebrew → no gh);
+	// anything secret-shaped must never appear.
+	if !strings.Contains(out, "<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>") {
+		t.Error("plist must set a PATH that includes Homebrew")
+	}
+	for _, banned := range []string{"TOKEN", "github_pat_", "SECRET"} {
+		if strings.Contains(out, banned) {
+			t.Errorf("generated plist must never carry credentials (found %q)", banned)
+		}
 	}
 }
 

@@ -36,6 +36,8 @@ type Provider struct {
 	extraEnv           []string
 	memoryBytes        int64
 	pidsLimit          int64
+	toolCache          bool
+	cachePaths         []string
 }
 
 type Options struct {
@@ -47,6 +49,10 @@ type Options struct {
 	MemoryBytes int64
 	// PidsLimit caps processes per job container (0 = unlimited).
 	PidsLimit int64
+	// ToolCache mounts a persistent per-slot RUNNER_TOOL_CACHE volume.
+	ToolCache bool
+	// CachePaths are additional absolute container paths persisted per slot.
+	CachePaths []string
 }
 
 func New(opts Options) (*Provider, error) {
@@ -72,12 +78,24 @@ func New(opts Options) (*Provider, error) {
 		extraEnv:           env,
 		memoryBytes:        opts.MemoryBytes,
 		pidsLimit:          opts.PidsLimit,
+		toolCache:          opts.ToolCache,
+		cachePaths:         opts.CachePaths,
 	}, nil
 }
 
 func (p *Provider) Ping(ctx context.Context) error {
 	_, err := p.cli.Ping(ctx)
 	return err
+}
+
+// NCPU reports the docker host's CPU count (the denominator for
+// oversubscription math: slots × cpus_per_slot should not exceed it).
+func (p *Provider) NCPU(ctx context.Context) (int, error) {
+	info, err := p.cli.Info(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return info.NCPU, nil
 }
 
 // EnsureImage pulls the runner image if it isn't present locally.
@@ -100,13 +118,15 @@ func (p *Provider) EnsureImage(ctx context.Context) error {
 // Spawn creates and starts one ephemeral runner container. The JIT config is
 // passed via env only — it is the single secret a job container ever holds.
 func (p *Provider) Spawn(ctx context.Context, slot int, runnerName, cpuset, jitConfig string) (string, error) {
+	env := []string{"ACTIONS_RUNNER_INPUT_JITCONFIG=" + jitConfig}
+	if p.toolCache {
+		env = append(env, "RUNNER_TOOL_CACHE="+ToolCachePath)
+	}
 	cfg := &container.Config{
 		Image: p.image,
 		User:  "runner",
 		Cmd:   []string{"/home/runner/run.sh"},
-		Env: append([]string{
-			"ACTIONS_RUNNER_INPUT_JITCONFIG=" + jitConfig,
-		}, p.extraEnv...),
+		Env:   append(env, p.extraEnv...),
 		Labels: map[string]string{
 			LabelManaged:    "true",
 			LabelSlot:       strconv.Itoa(slot),
@@ -132,6 +152,11 @@ func (p *Provider) Spawn(ctx context.Context, slot int, runnerName, cpuset, jitC
 	if p.exposeDockerSocket {
 		host.Binds = append(host.Binds, "/var/run/docker.sock:/var/run/docker.sock")
 	}
+	cacheBinds, err := p.cacheBinds(ctx, slot)
+	if err != nil {
+		return "", err
+	}
+	host.Binds = append(host.Binds, cacheBinds...)
 	created, err := p.cli.ContainerCreate(ctx, cfg, host, nil, nil, runnerName)
 	if err != nil {
 		return "", fmt.Errorf("create %s: %w", runnerName, err)

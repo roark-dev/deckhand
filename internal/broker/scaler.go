@@ -77,6 +77,14 @@ func (s *scaler) HandleJobStarted(ctx context.Context, job *scaleset.JobStarted)
 	if found {
 		b.event(bus.Info, b.slotIndexOf(job.RunnerName), fmt.Sprintf("job started: %s (%s)", info.DisplayName, info.Repo))
 	}
+	// Queue latency from GitHub's own timestamps: queued → assigned to a
+	// runner. This is the "slots ≪ demand" signal.
+	if !job.QueueTime.IsZero() && !job.RunnerAssignTime.IsZero() {
+		if ms := job.RunnerAssignTime.Sub(job.QueueTime).Milliseconds(); ms >= 0 {
+			b.counters.queueMsSum.Add(ms)
+			b.counters.queueCount.Add(1)
+		}
+	}
 	return nil
 }
 
@@ -99,6 +107,33 @@ func (s *scaler) HandleJobCompleted(ctx context.Context, job *scaleset.JobComple
 		}
 		b.event(bus.Info, slot, fmt.Sprintf("job %s: %s (%s)",
 			bus.Sanitize(job.Result), bus.Sanitize(job.JobDisplayName), bus.Sanitize(job.OwnerName+"/"+job.RepositoryName)))
+		// Job duration (assigned → finished): the number contention
+		// inflates. Track min/max so variance across identical jobs — the
+		// oversubscription health signal — is visible without histograms.
+		if !job.RunnerAssignTime.IsZero() && !job.FinishTime.IsZero() {
+			if ms := job.FinishTime.Sub(job.RunnerAssignTime).Milliseconds(); ms >= 0 {
+				b.counters.durMsSum.Add(ms)
+				b.counters.durCount.Add(1)
+				for {
+					cur := b.counters.durMsMin.Load()
+					if cur != 0 && ms >= cur {
+						break
+					}
+					if b.counters.durMsMin.CompareAndSwap(cur, ms) {
+						break
+					}
+				}
+				for {
+					cur := b.counters.durMsMax.Load()
+					if ms <= cur {
+						break
+					}
+					if b.counters.durMsMax.CompareAndSwap(cur, ms) {
+						break
+					}
+				}
+			}
+		}
 	}
 	if containerID != "" {
 		if err := b.provider.Remove(ctx, containerID); err != nil {

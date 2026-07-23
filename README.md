@@ -109,6 +109,23 @@ docker (Colima / OrbStack / Docker Desktop / Linux)
 
 - The daemon holds the **only** credential (PAT or App key). A job container
   receives exactly one secret: its single-job JIT runner config, via env.
+- **What persists across jobs** (everything else dies with the job's
+  container): the per-slot toolchain cache (`RUNNER_TOOL_CACHE` →
+  `/opt/hostedtoolcache`, so `actions/setup-*` hits "Found in cache" from job
+  #2 instead of re-downloading forever) and any `runner.cache_paths` you
+  configure (e.g. `/home/runner/.npm`). `deckhand caches list|wipe` shows and
+  resets them. Per-job fixed overhead is what host contention amplifies —
+  keeping these caches warm is the single biggest latency lever on a shared
+  box. Corollary for workflows: on self-hosted, **drop `cache:` on
+  `actions/setup-node` and similar** — restoring a remote cache tarball
+  duplicates what already persists locally and just adds network + extract
+  cost.
+- **Contention is the latency driver on a shared box.** Size
+  `slots × cpus_per_slot` to the host CPUs (`deckhand doctor` warns on
+  oversubscription), and watch `deckhand_job_duration_seconds_min/max` —
+  widening variance across identical jobs is the oversubscription tell.
+  Queue latency (`deckhand_job_queue_seconds_*`) shows when demand outruns
+  slots.
 - Containers are labeled; if the daemon restarts it **adopts** the running
   fleet from `docker ps` — a mid-job runner is never orphaned or killed.
 - Laptop-aware: sleep/wake is detected and the GitHub session resyncs;
@@ -126,6 +143,11 @@ rules, enforced or defaulted by deckhand:
 - Job containers get **no host mounts** and no credentials beyond their
   single-job JIT config. They run with `no-new-privileges`, a pids limit
   (default 2048) and an optional memory cap (`runner.memory_mb`).
+- Persistent caches are state one job can poison for later jobs on that
+  slot. Acceptable only under this tool's baseline trust model (private
+  repos, trusted collaborators, no fork PRs); `runner.tool_cache: false` and
+  an empty `cache_paths` disable persistence entirely, and
+  `deckhand caches wipe` resets it after any suspected poisoning.
   `runner.expose_docker_socket` exists for docker-in-workflow needs but hands
   job code root-equivalent control of the docker host — leave it off unless
   you need it and trust every workflow.

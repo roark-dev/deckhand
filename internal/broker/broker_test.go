@@ -897,3 +897,51 @@ func TestRemoveRunnerRegistrationNilSafe(t *testing.T) {
 		t.Fatal("RemoveRunner must not be called for an absent runner")
 	}
 }
+
+func TestLatencyCountersFromJobTimestamps(t *testing.T) {
+	b, _, _ := testBroker(t, 1, 0)
+	desire(t, b, 1)
+	s := slotByIndex(t, b, 0)
+	sc := &scaler{b: b}
+	queued := time.Now().Add(-90 * time.Second)
+	assigned := time.Now().Add(-60 * time.Second)
+	finished := time.Now()
+	_ = sc.HandleJobStarted(context.Background(), &scaleset.JobStarted{
+		RunnerName: s.RunnerName,
+		JobMessageBase: scaleset.JobMessageBase{
+			QueueTime:        queued,
+			RunnerAssignTime: assigned,
+		},
+	})
+	_ = sc.HandleJobCompleted(context.Background(), &scaleset.JobCompleted{
+		RunnerName: s.RunnerName,
+		Result:     "Succeeded",
+		JobMessageBase: scaleset.JobMessageBase{
+			RunnerAssignTime: assigned,
+			FinishTime:       finished,
+		},
+	})
+	st := b.Status().Counters
+	if st.QueueCount != 1 || st.QueueMsSum < 29000 || st.QueueMsSum > 31000 {
+		t.Fatalf("queue latency wrong: count=%d sum=%dms", st.QueueCount, st.QueueMsSum)
+	}
+	if st.DurationCount != 1 || st.DurationMsSum < 59000 || st.DurationMsSum > 61000 {
+		t.Fatalf("duration wrong: count=%d sum=%dms", st.DurationCount, st.DurationMsSum)
+	}
+	if st.DurationMsMin != st.DurationMsSum || st.DurationMsMax != st.DurationMsSum {
+		t.Fatalf("single job: min/max must equal the one duration (min=%d max=%d)", st.DurationMsMin, st.DurationMsMax)
+	}
+}
+
+func TestLatencyCountersIgnoreZeroTimestamps(t *testing.T) {
+	b, _, _ := testBroker(t, 1, 0)
+	desire(t, b, 1)
+	s := slotByIndex(t, b, 0)
+	sc := &scaler{b: b}
+	_ = sc.HandleJobStarted(context.Background(), &scaleset.JobStarted{RunnerName: s.RunnerName})
+	_ = sc.HandleJobCompleted(context.Background(), &scaleset.JobCompleted{RunnerName: s.RunnerName, Result: "failed"})
+	st := b.Status().Counters
+	if st.QueueCount != 0 || st.DurationCount != 0 {
+		t.Fatal("zero timestamps must not be counted as measurements")
+	}
+}

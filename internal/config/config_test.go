@@ -280,3 +280,34 @@ func TestDetectGitHubURL(t *testing.T) {
 		t.Fatalf("non-repo dir must return empty, got %q", got)
 	}
 }
+
+func TestCachePathsValidation(t *testing.T) {
+	if _, err := Load(writeConfig(t, minimal+`
+runner:
+  cache_paths: ["relative/.npm"]
+`)); err == nil {
+		t.Fatal("relative cache path must be rejected")
+	}
+	cfg, err := Load(writeConfig(t, minimal+`
+runner:
+  cache_paths: ["/home/runner/.npm"]
+  tool_cache: false
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Runner.ToolCacheEnabled() {
+		t.Fatal("tool_cache: false must disable the tool cache")
+	}
+	if len(cfg.Runner.CachePaths) != 1 {
+		t.Fatal("cache path not parsed")
+	}
+	// Default: tool cache on.
+	cfg, err = Load(writeConfig(t, minimal))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Runner.ToolCacheEnabled() {
+		t.Fatal("tool cache must default to enabled")
+	}
+}

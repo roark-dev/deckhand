@@ -219,6 +219,22 @@ var doctorCmd = &cobra.Command{
 			fmt.Printf("  ! runner image %q is a mutable tag — pin a digest (image@sha256:...) for supply-chain safety\n", cfg.Runner.Image)
 		}
 
+		// Oversubscription math: contention amplifies per-job fixed overhead
+		// (duration variance across identical jobs is the tell). Warn, don't
+		// fail — deliberate oversubscription can be fine for bursty light jobs.
+		if ncpu, nerr := prov.NCPU(ctx); nerr == nil && ncpu > 0 {
+			switch {
+			case cfg.Slots.CPUsPerSlot > 0 && cfg.Slots.Count*cfg.Slots.CPUsPerSlot > ncpu:
+				fmt.Printf("  ! oversubscribed: %d slots × %d cpus = %d > %d host CPUs — concurrent jobs will contend (expect duration variance)\n",
+					cfg.Slots.Count, cfg.Slots.CPUsPerSlot, cfg.Slots.Count*cfg.Slots.CPUsPerSlot, ncpu)
+			case cfg.Slots.CPUsPerSlot == 0 && cfg.Slots.Count > 1:
+				fmt.Printf("  ! %d slots with no cpu pinning: each job sees all %d CPUs and sizes its parallelism accordingly — set slots.cpus_per_slot to bound contention\n",
+					cfg.Slots.Count, ncpu)
+			default:
+				check(fmt.Sprintf("cpu budget (%d slots × %d cpus ≤ %d host CPUs)", cfg.Slots.Count, cfg.Slots.CPUsPerSlot, ncpu), nil)
+			}
+		}
+
 		ghErr := func() error {
 			client, err := cfg.ScalesetClient()
 			if err != nil {

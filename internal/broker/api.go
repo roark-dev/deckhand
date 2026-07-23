@@ -43,6 +43,15 @@ type CounterValues struct {
 	ZombiesReclaimed int64 `json:"zombies_reclaimed"`
 	SpawnErrors      int64 `json:"spawn_errors"`
 	Reconnects       int64 `json:"reconnects"`
+	// Latency accounting (ms) from GitHub's job timestamps; consumers derive
+	// averages from sum/count, and min vs max duration exposes the
+	// contention-variance health signal.
+	QueueMsSum    int64 `json:"queue_ms_sum"`
+	QueueCount    int64 `json:"queue_count"`
+	DurationMsSum int64 `json:"duration_ms_sum"`
+	DurationCount int64 `json:"duration_count"`
+	DurationMsMin int64 `json:"duration_ms_min"`
+	DurationMsMax int64 `json:"duration_ms_max"`
 }
 
 func (b *Broker) Status() Status {
@@ -74,6 +83,12 @@ func (b *Broker) Status() Status {
 			ZombiesReclaimed: b.counters.zombiesReclaimed.Load(),
 			SpawnErrors:      b.counters.spawnErrors.Load(),
 			Reconnects:       b.counters.reconnects.Load(),
+			QueueMsSum:       b.counters.queueMsSum.Load(),
+			QueueCount:       b.counters.queueCount.Load(),
+			DurationMsSum:    b.counters.durMsSum.Load(),
+			DurationCount:    b.counters.durCount.Load(),
+			DurationMsMin:    b.counters.durMsMin.Load(),
+			DurationMsMax:    b.counters.durMsMax.Load(),
 		},
 	}
 }

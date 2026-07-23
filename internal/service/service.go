@@ -36,6 +36,13 @@ func LaunchdPlist(s Spec) string {
     <string>%s</string>
     <string>up</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- launchd's default PATH misses Homebrew, which breaks gh auth and
+         docker CLI-context tooling. A PATH is not a credential. -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>

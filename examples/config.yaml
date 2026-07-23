@@ -70,6 +70,15 @@ runner:
   # -1 = explicitly unlimited. Containers also always run with
   # no-new-privileges.
   pids_limit: 2048
+  # Persist the actions/setup-* toolchain cache per slot (default true).
+  # Without it the ephemeral container re-downloads toolchains every job.
+  tool_cache: true
+  # Additional per-slot persistent paths, e.g. package-manager caches.
+  # SECURITY: persisted state is poisonable by job code — trusted repos only;
+  # `deckhand caches wipe` resets. On self-hosted, also DROP `cache:` from
+  # actions/setup-node etc. — the remote cache restore duplicates this.
+  cache_paths:
+    - /home/runner/.npm
 
 metrics:
   # Optional Prometheus text endpoint. Empty = disabled.

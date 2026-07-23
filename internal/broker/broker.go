@@ -153,6 +153,17 @@ type counters struct {
 	zombiesReclaimed atomic.Int64
 	spawnErrors      atomic.Int64
 	reconnects       atomic.Int64
+	// Latency accounting from GitHub's own job timestamps. Queue = job
+	// queued → assigned to a runner; duration = assigned → finished.
+	// Duration VARIANCE across identical jobs is the oversubscription
+	// health signal (contention amplifies fixed overhead), so min/max are
+	// tracked alongside the sums.
+	queueMsSum atomic.Int64
+	queueCount atomic.Int64
+	durMsSum   atomic.Int64
+	durCount   atomic.Int64
+	durMsMin   atomic.Int64
+	durMsMax   atomic.Int64
 }
 
 func New(cfg *config.Config, paths config.Paths, logger *slog.Logger, eventBus *bus.Bus, takeover bool) (*Broker, error) {
@@ -167,6 +178,8 @@ func New(cfg *config.Config, paths config.Paths, logger *slog.Logger, eventBus *
 		Env:                cfg.Runner.Env,
 		MemoryBytes:        int64(cfg.Runner.MemoryMB) << 20,
 		PidsLimit:          int64(cfg.Runner.PidsLimit),
+		ToolCache:          cfg.Runner.ToolCacheEnabled(),
+		CachePaths:         cfg.Runner.CachePaths,
 	})
 	if err != nil {
 		return nil, err
