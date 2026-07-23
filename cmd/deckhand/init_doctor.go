@@ -125,6 +125,13 @@ var initCmd = &cobra.Command{
 		cfg.ScaleSet.Name = name
 		cfg.Slots.Count = n
 		cfg.Runner.Image = config.DefaultRunnerImage
+		// Project-type detection: a Node repo gets a persistent npm cache out
+		// of the box (the remote `cache: npm` restore is redundant on
+		// self-hosted — see README).
+		if _, err := os.Stat("package.json"); err == nil {
+			cfg.Runner.CachePaths = []string{"/home/runner/.npm"}
+			fmt.Println("detected package.json — persisting /home/runner/.npm across jobs (per slot)")
+		}
 
 		if err := os.MkdirAll(paths.Home, 0o700); err != nil {
 			return err
@@ -227,8 +234,12 @@ var doctorCmd = &cobra.Command{
 			case cfg.Slots.CPUsPerSlot > 0 && cfg.Slots.Count*cfg.Slots.CPUsPerSlot > ncpu:
 				fmt.Printf("  ! oversubscribed: %d slots × %d cpus = %d > %d host CPUs — concurrent jobs will contend (expect duration variance)\n",
 					cfg.Slots.Count, cfg.Slots.CPUsPerSlot, cfg.Slots.Count*cfg.Slots.CPUsPerSlot, ncpu)
-			case cfg.Slots.CPUsPerSlot == 0 && cfg.Slots.Count > 1:
-				fmt.Printf("  ! %d slots with no cpu pinning: each job sees all %d CPUs and sizes its parallelism accordingly — set slots.cpus_per_slot to bound contention\n",
+			case cfg.Slots.CPUsPerSlot == 0 && ncpu/cfg.Slots.Count >= 1:
+				check(fmt.Sprintf("cpu pinning: auto (%d host CPUs / %d slots = %d per slot)", ncpu, cfg.Slots.Count, ncpu/cfg.Slots.Count), nil)
+			case cfg.Slots.CPUsPerSlot == 0:
+				fmt.Printf("  ! %d slots > %d host CPUs — auto pinning disabled, jobs will contend; lower slots.count\n", cfg.Slots.Count, ncpu)
+			case cfg.Slots.CPUsPerSlot < 0 && cfg.Slots.Count > 1:
+				fmt.Printf("  ! pinning disabled (cpus_per_slot: -1): each of %d concurrent jobs sees all %d CPUs and sizes parallelism accordingly\n",
 					cfg.Slots.Count, ncpu)
 			default:
 				check(fmt.Sprintf("cpu budget (%d slots × %d cpus ≤ %d host CPUs)", cfg.Slots.Count, cfg.Slots.CPUsPerSlot, ncpu), nil)

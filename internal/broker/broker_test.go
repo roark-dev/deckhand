@@ -109,6 +109,7 @@ type fakeProvider struct {
 	spawnErr   error
 	imageErr   error
 	workerErr  error
+	ncpu       int
 	containers map[string]*fakeContainer
 	removed    []string
 	nextID     int
@@ -209,6 +210,18 @@ func (p *fakeProvider) PruneExited(context.Context, time.Duration) (int, error) 
 		return 0, p.pingErr
 	}
 	return 0, nil
+}
+
+func (p *fakeProvider) NCPU(context.Context) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.pingErr != nil {
+		return 0, p.pingErr
+	}
+	if p.ncpu == 0 {
+		return 8, nil
+	}
+	return p.ncpu, nil
 }
 
 func (p *fakeProvider) exitContainer(id string, code int64) {
@@ -943,5 +956,40 @@ func TestLatencyCountersIgnoreZeroTimestamps(t *testing.T) {
 	st := b.Status().Counters
 	if st.QueueCount != 0 || st.DurationCount != 0 {
 		t.Fatal("zero timestamps must not be counted as measurements")
+	}
+}
+
+func TestAutoPinDividesHostCPUs(t *testing.T) {
+	b, _, _ := testBroker(t, 4, 0) // cfg.Slots.CPUsPerSlot == 0 → auto
+	b.applyAutoPin(context.Background())
+	snap := b.slots.Snapshot()
+	if snap[0].Cpuset != "0-1" || snap[3].Cpuset != "6-7" {
+		t.Fatalf("auto pin with 8 cpus / 4 slots should give 2-wide cpusets, got %q and %q", snap[0].Cpuset, snap[3].Cpuset)
+	}
+	// Scale changes the per-slot share.
+	if err := b.Scale(2); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := b.slots.Get(0); got.Cpuset != "0-3" {
+		t.Fatalf("after scale 2, slot 0 should own 4 cpus, got %q", got.Cpuset)
+	}
+}
+
+func TestAutoPinMoreSlotsThanCPUs(t *testing.T) {
+	b, _, provider := testBroker(t, 4, 0)
+	provider.ncpu = 2
+	b.applyAutoPin(context.Background())
+	if got, _ := b.slots.Get(0); got.Cpuset != "" {
+		t.Fatalf("ncpu < slots must leave slots unpinned, got %q", got.Cpuset)
+	}
+}
+
+func TestExplicitPinNotOverridden(t *testing.T) {
+	b, _, _ := testBroker(t, 2, 0)
+	b.cfg.Slots.CPUsPerSlot = 3 // explicit
+	b.slots.SetCPUsPerSlot(3)
+	b.applyAutoPin(context.Background())
+	if got, _ := b.slots.Get(0); got.Cpuset != "0-2" {
+		t.Fatalf("explicit pinning must not be auto-overridden, got %q", got.Cpuset)
 	}
 }

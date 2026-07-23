@@ -70,6 +70,7 @@ type containerProvider interface {
 	LogsTail(ctx context.Context, containerID string, n int) (string, error)
 	ListManaged(ctx context.Context) ([]runner.Managed, error)
 	PruneExited(ctx context.Context, olderThan time.Duration) (int, error)
+	NCPU(ctx context.Context) (int, error)
 }
 
 // timings collects every interval/threshold so tests can compress time.
@@ -211,8 +212,34 @@ func newBroker(cfg *config.Config, paths config.Paths, logger *slog.Logger, even
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		logger.Warn("state file unreadable; using configured slot count", "error", err)
 	}
-	b.slots = slots.NewManager(target, cfg.Slots.CPUsPerSlot)
+	// -1 (no pinning) and 0 (auto — resolved once docker answers) both start
+	// unpinned; auto is applied by applyAutoPin.
+	perSlot := cfg.Slots.CPUsPerSlot
+	if perSlot < 0 {
+		perSlot = 0
+	}
+	b.slots = slots.NewManager(target, perSlot)
 	return b
+}
+
+// applyAutoPin divides the docker host's CPUs across the slot target when
+// cpus_per_slot is 0 (auto) — out-of-the-box contention bounding with no
+// config. Fewer CPUs than slots means pinning can't help; slots stay
+// unpinned. Called at startup, on docker recovery (VM resizes change NCPU)
+// and on scale changes.
+func (b *Broker) applyAutoPin(ctx context.Context) {
+	if b.cfg.Slots.CPUsPerSlot != 0 {
+		return
+	}
+	ncpu, err := b.provider.NCPU(ctx)
+	if err != nil || ncpu <= 0 {
+		return
+	}
+	target := b.slots.Target()
+	if target <= 0 {
+		return
+	}
+	b.slots.SetCPUsPerSlot(ncpu / target) // 0 when ncpu < target = unpinned
 }
 
 func (b *Broker) loadState() (persistedState, error) {
@@ -473,6 +500,7 @@ func (b *Broker) reconcile(ctx context.Context) {
 		return
 	}
 	b.setDockerDown(false)
+	b.applyAutoPin(ctx)
 
 	byID := make(map[string]runner.Managed, len(managed))
 	for _, m := range managed {

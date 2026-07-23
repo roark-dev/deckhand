@@ -86,6 +86,21 @@ func NewManager(target, cpusPerSlot int) *Manager {
 	return m
 }
 
+// SetCPUsPerSlot changes the pinning width and recomputes every slot's
+// cpuset. Safe at runtime: cpusets are consumed at spawn, so running
+// containers keep their old pin until their slot recycles.
+func (m *Manager) SetCPUsPerSlot(n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cpusPerSlot == n {
+		return
+	}
+	m.cpusPerSlot = n
+	for _, s := range m.slots {
+		s.Cpuset = m.cpuset(s.Index)
+	}
+}
+
 func (m *Manager) cpuset(index int) string {
 	if m.cpusPerSlot <= 0 {
 		return ""

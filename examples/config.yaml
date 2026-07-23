@@ -46,9 +46,9 @@ slots:
   # Keep this many runners pre-registered and idle so jobs skip the
   # container-boot wait. Costs idle RAM; 0 = spawn purely on demand.
   warm: 0
-  # Pin each slot to a dedicated cpuset of this many CPUs (slot 0 → cpus 0-1,
-  # slot 1 → 2-3, ...). Bounds per-job parallelism/memory on shared boxes;
-  # 0 = no pinning.
+  # CPU pinning bounds each job's parallelism (and therefore memory) on a
+  # shared host. 0 (default) = AUTO: host CPUs are divided across the slots,
+  # recomputed on scale changes. N pins each slot to N CPUs; -1 disables.
   cpus_per_slot: 0
 
 runner:

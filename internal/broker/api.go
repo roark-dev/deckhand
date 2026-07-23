@@ -100,6 +100,7 @@ func (b *Broker) Scale(n int) error {
 		return fmt.Errorf("slot count %d out of range 0-%d", n, config.MaxSlots)
 	}
 	b.slots.SetTarget(n)
+	b.applyAutoPin(context.Background())
 	b.saveState()
 	b.poke()
 	b.event(bus.Action, -1, fmt.Sprintf("slot target set to %d", n))

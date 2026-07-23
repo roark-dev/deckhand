@@ -76,7 +76,11 @@ type Slots struct {
 	// without waiting for a container boot. 0 = spawn purely on demand.
 	Warm int `yaml:"warm"`
 	// CPUsPerSlot pins each slot to a dedicated cpuset of this size
-	// (slot i gets cpus [i*n, (i+1)*n)). 0 disables pinning.
+	// (slot i gets cpus [i*n, (i+1)*n)), which bounds each job's
+	// parallelism — and therefore memory — on a shared host.
+	// 0 (default) = AUTO: deckhand divides the docker host's CPUs across
+	// the slot count at startup and on every scale change. -1 disables
+	// pinning entirely.
 	CPUsPerSlot int `yaml:"cpus_per_slot"`
 }
 
@@ -231,8 +235,8 @@ func (c *Config) Validate() error {
 	if c.Slots.Warm < 0 || c.Slots.Warm > c.Slots.Count {
 		return fmt.Errorf("slots.warm %d must be within 0..slots.count", c.Slots.Warm)
 	}
-	if c.Slots.CPUsPerSlot < 0 {
-		return errors.New("slots.cpus_per_slot cannot be negative")
+	if c.Slots.CPUsPerSlot < -1 {
+		return errors.New("slots.cpus_per_slot must be -1 (no pinning), 0 (auto) or positive")
 	}
 	return nil
 }
