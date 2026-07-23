@@ -21,6 +21,7 @@ floor_for() {
     internal/bus) echo 95 ;;
     internal/config) echo 70 ;;
     internal/control) echo 70 ;;
+    internal/githubauth) echo 75 ;;
     internal/metrics) echo 60 ;;
     internal/slots) echo 90 ;;
     *) echo "" ;;

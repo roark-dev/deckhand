@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -45,7 +47,11 @@ type GitHub struct {
 }
 
 type Auth struct {
-	// Exactly one of Token / TokenEnv / TokenFile / App.
+	// Exactly one of GH / Token / TokenEnv / TokenFile / App.
+	//
+	// GH reuses the local `gh` CLI's login (`gh auth token`): deckhand then
+	// stores no credential at all — the most self-serve option.
+	GH        bool   `yaml:"gh,omitempty"`
 	Token     string `yaml:"token,omitempty"`
 	TokenEnv  string `yaml:"token_env,omitempty"`
 	TokenFile string `yaml:"token_file,omitempty"`
@@ -184,13 +190,13 @@ func (c *Config) Validate() error {
 	}
 	n := 0
 	a := c.GitHub.Auth
-	for _, set := range []bool{a.Token != "", a.TokenEnv != "", a.TokenFile != "", a.App != nil} {
+	for _, set := range []bool{a.GH, a.Token != "", a.TokenEnv != "", a.TokenFile != "", a.App != nil} {
 		if set {
 			n++
 		}
 	}
 	if n != 1 {
-		return errors.New("github.auth needs exactly one of: token, token_env, token_file, app")
+		return errors.New("github.auth needs exactly one of: gh, token, token_env, token_file, app")
 	}
 	if a.App != nil && (a.App.ClientID == "" || a.App.InstallationID == 0 || a.App.PrivateKeyFile == "") {
 		return errors.New("github.auth.app needs client_id, installation_id and private_key_file")
@@ -210,10 +216,21 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// ResolveToken returns the configured PAT, or "" when GitHub App auth is used.
+// ResolveToken returns the configured token, or "" when GitHub App auth is
+// used.
 func (c *Config) ResolveToken() (string, error) {
 	a := c.GitHub.Auth
 	switch {
+	case a.GH:
+		out, err := exec.Command("gh", "auth", "token").Output()
+		if err != nil {
+			return "", fmt.Errorf("github.auth.gh: `gh auth token` failed (is gh installed and logged in? try `gh auth status`): %w", err)
+		}
+		token := strings.TrimSpace(string(out))
+		if token == "" {
+			return "", errors.New("github.auth.gh: `gh auth token` returned nothing — run `gh auth login`")
+		}
+		return token, nil
 	case a.Token != "":
 		return a.Token, nil
 	case a.TokenEnv != "":
@@ -230,6 +247,26 @@ func (c *Config) ResolveToken() (string, error) {
 		return strings.TrimSpace(string(raw)), nil
 	}
 	return "", nil
+}
+
+var gitRemoteRe = regexp.MustCompile(`(?:git@github\.com:|https://github\.com/)([\w.-]+/[\w.-]+?)(?:\.git)?$`)
+
+// DetectGitHubURL inspects the git remote of dir (typically the CWD) and
+// returns the matching https://github.com/owner/repo URL, or "" if dir isn't
+// a git repo with a GitHub remote. Used by `deckhand init` to pre-fill the
+// target so setup is press-enter-through.
+func DetectGitHubURL(dir string) string {
+	cmd := exec.Command("git", "remote", "get-url", "origin")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	m := gitRemoteRe.FindStringSubmatch(strings.TrimSpace(string(out)))
+	if m == nil {
+		return ""
+	}
+	return "https://github.com/" + m[1]
 }
 
 // ScalesetClient builds the authenticated scaleset API client.

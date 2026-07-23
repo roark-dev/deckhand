@@ -41,7 +41,7 @@ fleet live.`,
 
 func main() {
 	root.PersistentFlags().StringVarP(&flagConfig, "config", "c", "", "config file (default ~/.deckhand/config.yaml)")
-	root.AddCommand(upCmd, dashCmd, statusCmd, scaleCmd, pauseCmd, resumeCmd, drainCmd, stopCmd, logsCmd, reclaimCmd, doctorCmd, initCmd, versionCmd)
+	root.AddCommand(upCmd, dashCmd, statusCmd, scaleCmd, pauseCmd, resumeCmd, drainCmd, stopCmd, logsCmd, reclaimCmd, doctorCmd, initCmd, serviceCmd, versionCmd)
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)

@@ -44,12 +44,15 @@ deckhand uses GitHub's [Runner Scale Set APIs](https://github.com/actions/scales
 ```sh
 brew install go && go install github.com/roark-dev/deckhand/cmd/deckhand@latest  # or grab a release binary
 
-deckhand init      # asks for your repo/org URL, token env var, slot count
-export DECKHAND_GITHUB_TOKEN=<fine-grained PAT>
-deckhand doctor    # verifies docker + GitHub connectivity
-deckhand up        # the daemon (foreground; see templates/ for launchd/systemd)
-deckhand dash      # dashboard, from another terminal
+cd ~/my-repo               # deckhand init reads the git remote to pre-fill the target
+deckhand init              # auth: reuse your `gh` login (nothing to create or paste),
+                           # or browser device-code sign-in, or a token you provide
+deckhand service install   # generates + starts the launchd/systemd service (or run `deckhand up`)
+deckhand dash              # dashboard
 ```
+
+With `gh` auth, deckhand stores **no credential at all** — it asks the gh CLI
+at startup. `deckhand doctor` verifies the whole setup end to end.
 
 Then point workflows at it:
 

@@ -8,9 +8,13 @@ github:
 
   # Exactly ONE of the following auth methods.
   auth:
-    # Recommended for workstations: read the token from an env var so the
-    # config file never holds a secret.
-    token_env: DECKHAND_GITHUB_TOKEN
+    # Recommended for workstations: reuse the gh CLI's login (`gh auth
+    # token`). deckhand stores no credential at all.
+    gh: true
+
+    # Or read the token from an env var so the config file never holds a
+    # secret:
+    # token_env: DECKHAND_GITHUB_TOKEN
 
     # Or read it from a file (e.g. a keychain-backed path):
     # token_file: /Users/me/.deckhand/token

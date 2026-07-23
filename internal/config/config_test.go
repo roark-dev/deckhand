@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -229,5 +230,53 @@ func TestLoadMissingFile(t *testing.T) {
 	_, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
 	if !os.IsNotExist(err) {
 		t.Fatalf("want raw not-exist error for caller mapping, got %v", err)
+	}
+}
+
+func TestAuthGHExactlyOne(t *testing.T) {
+	body := `
+github:
+  url: https://github.com/me/repo
+  auth:
+    gh: true
+`
+	cfg, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.GitHub.Auth.GH {
+		t.Fatal("gh auth not parsed")
+	}
+	// gh combined with another method must be rejected.
+	if _, err := Load(writeConfig(t, body+"    token: abc\n")); err == nil {
+		t.Fatal("gh + token must fail exactly-one validation")
+	}
+}
+
+func TestDetectGitHubURL(t *testing.T) {
+	dir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	run("init", "-q")
+	run("remote", "add", "origin", "git@github.com:me/my-repo.git")
+	if got := DetectGitHubURL(dir); got != "https://github.com/me/my-repo" {
+		t.Fatalf("ssh remote: got %q", got)
+	}
+	run("remote", "set-url", "origin", "https://github.com/me/other.git")
+	if got := DetectGitHubURL(dir); got != "https://github.com/me/other" {
+		t.Fatalf("https remote: got %q", got)
+	}
+	run("remote", "set-url", "origin", "https://gitlab.com/me/elsewhere.git")
+	if got := DetectGitHubURL(dir); got != "" {
+		t.Fatalf("non-github remote must return empty, got %q", got)
+	}
+	if got := DetectGitHubURL(t.TempDir()); got != "" {
+		t.Fatalf("non-repo dir must return empty, got %q", got)
 	}
 }

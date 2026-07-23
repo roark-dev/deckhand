@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -15,8 +16,15 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/roark-dev/deckhand/internal/config"
+	"github.com/roark-dev/deckhand/internal/githubauth"
 	"github.com/roark-dev/deckhand/internal/runner"
 )
+
+var flagOAuthClientID string
+
+func init() {
+	initCmd.Flags().StringVar(&flagOAuthClientID, "oauth-client-id", "", "OAuth app client ID for browser device login (also DECKHAND_OAUTH_CLIENT_ID)")
+}
 
 var initCmd = &cobra.Command{
 	Use:   "init",
@@ -52,12 +60,59 @@ var initCmd = &cobra.Command{
 
 		fmt.Println("deckhand setup — one runner scale set, load-balanced across local slots.")
 		fmt.Println()
-		url := ask("GitHub org or repo URL the runners serve (e.g. https://github.com/me/repo)", "")
+
+		// Pre-fill the target from the current directory's git remote so a
+		// `cd my-repo && deckhand init` is press-enter-through.
+		urlDefault := config.DetectGitHubURL(".")
+		url := ask("GitHub org or repo URL the runners serve", urlDefault)
+		if url == "" {
+			return errors.New("a GitHub org or repo URL is required")
+		}
+
+		// Auth: prefer whatever needs the least of the user.
+		ghAvailable := exec.Command("gh", "auth", "token").Run() == nil
 		fmt.Println()
-		fmt.Println("Auth: deckhand needs a fine-grained PAT (repo Administration: read/write for a")
-		fmt.Println("repo URL; org Self-hosted runners: read/write for an org URL), or a GitHub App.")
-		fmt.Println("The credential stays on this machine; job containers never see it.")
-		tokenEnv := ask("Environment variable holding the token (recommended over storing it in the file)", "DECKHAND_GITHUB_TOKEN")
+		fmt.Println("How should deckhand authenticate to GitHub?")
+		authDefault := "2"
+		if ghAvailable {
+			fmt.Println("  1) gh CLI — reuse your existing `gh` login; deckhand stores no credential (recommended)")
+			authDefault = "1"
+		} else {
+			fmt.Println("  1) gh CLI — not detected (`gh auth status` failed)")
+		}
+		fmt.Println("  2) browser — sign in with a device code (like `gh auth login`)")
+		fmt.Println("  3) token — you provide a PAT via env var or file")
+		choice := ask("Auth method", authDefault)
+
+		cfg := config.Config{}
+		cfg.GitHub.URL = url
+		switch choice {
+		case "1":
+			if !ghAvailable {
+				return errors.New("gh CLI auth not available — install gh and run `gh auth login`, or pick another method")
+			}
+			cfg.GitHub.Auth.GH = true
+		case "2":
+			token, err := deviceLogin(cmd.Context(), url)
+			if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(paths.Home, 0o700); err != nil {
+				return err
+			}
+			tokenPath := filepath.Join(paths.Home, "token")
+			if err := os.WriteFile(tokenPath, []byte(token), 0o600); err != nil {
+				return err
+			}
+			cfg.GitHub.Auth.TokenFile = tokenPath
+			fmt.Printf("token saved to %s (0600)\n", tokenPath)
+		case "3":
+			tokenEnv := ask("Environment variable holding the token", "DECKHAND_GITHUB_TOKEN")
+			cfg.GitHub.Auth.TokenEnv = tokenEnv
+		default:
+			return fmt.Errorf("unknown choice %q", choice)
+		}
+
 		name := ask("Scale set name (this is what `runs-on:` will reference)", "deckhand")
 		slotsN := ask("Slots (max concurrent jobs)", strconv.Itoa(4))
 		if askErr != nil {
@@ -67,10 +122,6 @@ var initCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("not a number: %s", slotsN)
 		}
-
-		cfg := config.Config{}
-		cfg.GitHub.URL = url
-		cfg.GitHub.Auth.TokenEnv = tokenEnv
 		cfg.ScaleSet.Name = name
 		cfg.Slots.Count = n
 		cfg.Runner.Image = config.DefaultRunnerImage
@@ -88,12 +139,41 @@ var initCmd = &cobra.Command{
 			return err
 		}
 		fmt.Printf("\nwrote %s\n\nnext steps:\n", paths.ConfigFile)
-		fmt.Printf("  1. export %s=<your token>\n", tokenEnv)
-		fmt.Printf("  2. deckhand doctor   # verify docker + github connectivity\n")
-		fmt.Printf("  3. deckhand up       # start the daemon\n")
-		fmt.Printf("  4. use `runs-on: %s` in your workflows\n", name)
+		step := 1
+		if choice == "3" {
+			fmt.Printf("  %d. export %s=<your token>\n", step, cfg.GitHub.Auth.TokenEnv)
+			step++
+		}
+		fmt.Printf("  %d. deckhand doctor            # verify docker + github connectivity\n", step)
+		fmt.Printf("  %d. deckhand service install   # run at login (or `deckhand up` in a terminal)\n", step+1)
+		fmt.Printf("  %d. use `runs-on: %s` in your workflows\n", step+2, name)
 		return nil
 	},
+}
+
+// deviceLogin runs the browser device-code flow. Repo-level targets need the
+// `repo` scope; an org-level target additionally needs admin:org.
+func deviceLogin(ctx context.Context, targetURL string) (string, error) {
+	scopes := []string{"repo"}
+	// An org URL has no repo path segment: https://github.com/my-org
+	if parts := strings.Split(strings.TrimPrefix(strings.TrimSuffix(targetURL, "/"), "https://github.com/"), "/"); len(parts) == 1 && parts[0] != "" {
+		scopes = append(scopes, "admin:org")
+	}
+	clientID := flagOAuthClientID
+	if clientID == "" {
+		clientID = os.Getenv("DECKHAND_OAUTH_CLIENT_ID")
+	}
+	if clientID == "" {
+		clientID = githubauth.DefaultClientID
+	}
+	flow := &githubauth.Flow{
+		ClientID: clientID,
+		Scopes:   scopes,
+		Prompt: func(code, uri string) {
+			fmt.Printf("\n  Open %s and enter code: %s\n  (waiting for approval…)\n\n", uri, code)
+		},
+	}
+	return flow.Run(ctx)
 }
 
 var doctorCmd = &cobra.Command{
