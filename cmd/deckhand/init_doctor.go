@@ -170,17 +170,37 @@ var doctorCmd = &cobra.Command{
 // colimaPosture warns about Colima's default writable-$HOME mount, which
 // hands job code (root-equivalent via any exposed docker socket) a path to
 // host credentials. Advisory only — non-Colima hosts skip it silently.
+//
+// The probes use HOST-home paths (/Users/you/...): mounts appear in the VM
+// at their host paths, while the VM user's own $HOME (/home/*.guest) always
+// contains a Lima-provisioned .ssh and must not be mistaken for exposure.
 func colimaPosture(check func(string, error)) {
 	if _, err := exec.LookPath("colima"); err != nil {
 		return
 	}
-	out, err := exec.Command("colima", "ssh", "--", "sh", "-c", "test -e \"$HOME/.aws\" || test -e \"$HOME/.ssh\"; echo $?").Output()
+	hostHome, err := os.UserHomeDir()
 	if err != nil {
-		return // colima not running; nothing to assert
+		return
 	}
-	if strings.TrimSpace(string(out)) == "0" {
-		check("colima mount posture", fmt.Errorf("the VM can see ~/.aws or ~/.ssh — with default mounts, job code that reaches the docker socket can read host credentials; restrict mounts in ~/.colima/default/colima.yaml (see templates/colima.yaml)"))
+	var exposed []string
+	probed := false
+	for _, dir := range []string{".aws", ".ssh", ".deckhand"} {
+		path := hostHome + "/" + dir
+		out, err := exec.Command("colima", "ssh", "--", "sh", "-c", fmt.Sprintf("test -e %q && echo yes || echo no", path)).Output()
+		if err != nil {
+			return // colima not running; nothing to assert
+		}
+		probed = true
+		if strings.TrimSpace(string(out)) == "yes" {
+			exposed = append(exposed, "~/"+dir)
+		}
+	}
+	if !probed {
+		return
+	}
+	if len(exposed) > 0 {
+		check("colima mount posture", fmt.Errorf("the VM can see %s — with permissive mounts, job code that reaches the docker socket can read host credentials; restrict mounts in ~/.colima/default/colima.yaml (see templates/colima.yaml)", strings.Join(exposed, ", ")))
 	} else {
-		check("colima mount posture (restricted)", nil)
+		check("colima mount posture (host credentials hidden)", nil)
 	}
 }

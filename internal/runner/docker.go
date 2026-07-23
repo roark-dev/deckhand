@@ -50,7 +50,13 @@ type Options struct {
 }
 
 func New(opts Options) (*Provider, error) {
-	cli, err := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
+	clientOpts := []dockerclient.Opt{dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation()}
+	// Honor the docker CLI's current context (Colima, OrbStack, ...) — the
+	// SDK alone would silently target /var/run/docker.sock.
+	if host := resolveDockerHost(); host != "" {
+		clientOpts = append(clientOpts, dockerclient.WithHost(host))
+	}
+	cli, err := dockerclient.NewClientWithOpts(clientOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("docker client: %w", err)
 	}
