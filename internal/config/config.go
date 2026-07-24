@@ -135,6 +135,7 @@ type Metrics struct {
 // Paths locates everything deckhand keeps on disk.
 type Paths struct {
 	Home       string // state dir, default ~/.deckhand
+	Instance   string // instance name; "" is the legacy default (flat ~/.deckhand)
 	ConfigFile string
 	Socket     string
 	LockFile   string
