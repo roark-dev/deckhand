@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -157,11 +158,11 @@ github:
 slots:
   count: 65
 `, "out of range"},
-		{"negative cpus", minimal + `
+		{"cpus below -1", minimal + `
 slots:
   count: 2
-  cpus_per_slot: -1
-`, "cannot be negative"},
+  cpus_per_slot: -2
+`, "cpus_per_slot must be -1"},
 		{"negative memory", minimal + `
 runner:
   memory_mb: -5
@@ -174,6 +175,19 @@ runner:
 				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
 			}
 		})
+	}
+}
+
+func TestCPUsPerSlotSentinels(t *testing.T) {
+	// -1 (no pinning) and 0 (auto) are valid sentinels, not errors.
+	for _, v := range []int{-1, 0} {
+		if _, err := Load(writeConfig(t, minimal+fmt.Sprintf(`
+slots:
+  count: 2
+  cpus_per_slot: %d
+`, v))); err != nil {
+			t.Fatalf("cpus_per_slot %d should be valid, got %v", v, err)
+		}
 	}
 }
 

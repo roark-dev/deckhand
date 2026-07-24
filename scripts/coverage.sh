@@ -31,7 +31,12 @@ floor_for() {
 
 profile=$(mktemp)
 trap 'rm -f "$profile"' EXIT
-go test -race -coverprofile="$profile" ./... >/dev/null
+# Quiet on success, but a failing suite must print — this once died silently
+# in CI behind >/dev/null.
+if ! out=$(go test -race -coverprofile="$profile" ./... 2>&1); then
+  printf '%s\n' "$out" | grep -v '^ok ' >&2
+  exit 1
+fi
 
 fail=0
 while IFS= read -r line; do
