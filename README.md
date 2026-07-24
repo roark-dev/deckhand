@@ -54,6 +54,21 @@ deckhand dash              # dashboard
 With `gh` auth, deckhand stores **no credential at all** — it asks the gh CLI
 at startup. `deckhand doctor` verifies the whole setup end to end.
 
+### Multiple repos on one machine
+
+Just `cd` into another repo and `deckhand init` again — each repo gets its own
+instance (config, daemon, socket, and service) under
+`~/.deckhand/instances/<org>-<repo>/`, keyed by the git remote. Every command
+auto-targets the instance for the repo you're in; from elsewhere, pass
+`--instance <name>` (or `DECKHAND_INSTANCE`). `deckhand instances` lists them.
+
+```sh
+cd ~/repo-a && deckhand init && deckhand service install
+cd ~/repo-b && deckhand init && deckhand service install   # a second, independent instance
+deckhand instances                                          # see both
+deckhand dash --instance <name>                             # target one from anywhere
+```
+
 Then point workflows at it:
 
 ```yaml

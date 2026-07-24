@@ -27,9 +27,33 @@ func init() {
 	initCmd.Flags().StringVar(&flagOAuthClientID, "oauth-client-id", "", "OAuth app client ID for browser device login (also DECKHAND_OAUTH_CLIENT_ID)")
 }
 
+var instancesCmd = &cobra.Command{
+	Use:   "instances",
+	Short: "List the configured deckhand instances (one per org/repo)",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		list := config.ListInstances()
+		if len(list) == 0 {
+			fmt.Println("no instances configured yet — run `deckhand init` inside a repo")
+			return nil
+		}
+		for _, in := range list {
+			marker := "  "
+			if in.Name == paths.Instance || (in.IsDefault && paths.Instance == "") {
+				marker = "* " // the instance this directory resolves to
+			}
+			def := ""
+			if in.IsDefault {
+				def = "  (default)"
+			}
+			fmt.Printf("%s%-28s %s%s\n", marker, in.Name, in.URL, def)
+		}
+		return nil
+	},
+}
+
 var initCmd = &cobra.Command{
 	Use:   "init",
-	Short: "Interactive setup: write ~/.deckhand/config.yaml",
+	Short: "Interactive setup: write the config for this repo's instance",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if existing, err := config.Load(paths.ConfigFile); err == nil {
 			// Re-running init must not be an error when there's nothing to
@@ -40,7 +64,10 @@ var initCmd = &cobra.Command{
 				fmt.Println("nothing to do — next: `deckhand service install`, then `runs-on: " + existing.ScaleSet.Name + "`")
 				return nil
 			}
-			return fmt.Errorf("%s already exists but targets %s, not this repo (%s) — one deckhand serves one org/repo; edit the config, or use DECKHAND_HOME for a second instance",
+			// With per-repo instances this only happens under an explicit
+			// override (--instance / DECKHAND_INSTANCE / DECKHAND_HOME / -c)
+			// pointing at another repo's config.
+			return fmt.Errorf("%s targets %s, not this repo (%s) — deckhand keeps a separate instance per repo, so run `deckhand init` without an override here, or edit that config",
 				paths.ConfigFile, existing.GitHub.URL, detected)
 		} else if !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("%s exists but is invalid: %w (fix or delete it, then re-run init)", paths.ConfigFile, err)

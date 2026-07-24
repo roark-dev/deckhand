@@ -20,18 +20,18 @@ func init() {
 				if _, err := loadConfig(); err != nil {
 					return err // no point installing a service that can't start
 				}
-				return service.Install()
+				return service.Install(paths.Instance, paths.Home)
 			},
 		},
 		&cobra.Command{
 			Use:   "uninstall",
 			Short: "Stop the service and remove its definition",
-			RunE:  func(cmd *cobra.Command, args []string) error { return service.Uninstall() },
+			RunE:  func(cmd *cobra.Command, args []string) error { return service.Uninstall(paths.Instance, paths.Home) },
 		},
 		&cobra.Command{
 			Use:   "status",
 			Short: "Show whether the service is installed and running",
-			RunE:  func(cmd *cobra.Command, args []string) error { return service.Status() },
+			RunE:  func(cmd *cobra.Command, args []string) error { return service.Status(paths.Instance, paths.Home) },
 		},
 	)
 }
