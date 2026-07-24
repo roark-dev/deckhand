@@ -25,12 +25,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: go vet ./...
-      - name: build + test
-        env:
-          # The stock actions-runner image has no gcc, so cgo (and therefore
-          # -race) is unavailable; a custom image would restore full parity.
-          CGO_ENABLED: "0"
-        run: |
-          go build ./...
-          go test ./...
+      # Full parity with ci.yml — the deckhand runner image (images/ci-runner)
+      # bakes in make + gcc, so `make cover` (race detector, cgo) runs here too.
+      - run: make lint
+      - run: make cover
+      - run: go build ./...
