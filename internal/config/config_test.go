@@ -30,8 +30,12 @@ func TestLoadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ScaleSet.Name != "repo" { // derived from github.com/me/repo
-		t.Errorf("default scale set name = %q, want repo (derived from the URL)", cfg.ScaleSet.Name)
+	// A config with no scale_set.name must default to the STABLE "deckhand" —
+	// NOT a URL-derived name — so existing nameless configs keep their scale set
+	// (deriving would rename tradingBot's and break its CI). init writes the
+	// repo-derived name explicitly; that path is covered by TestDefaultScaleSetName.
+	if cfg.ScaleSet.Name != "deckhand" {
+		t.Errorf("default scale set name = %q, want deckhand (stable, not URL-derived)", cfg.ScaleSet.Name)
 	}
 	if cfg.ScaleSet.RunnerGroup != "default" {
 		t.Errorf("default runner group = %q", cfg.ScaleSet.RunnerGroup)
@@ -41,6 +45,24 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.Runner.Image == "" {
 		t.Error("default image empty")
+	}
+}
+
+// Regression: a nameless config whose URL would derive to something OTHER than
+// "deckhand" must still default to "deckhand" on load — otherwise loading
+// tradingBot's nameless config would rename its scale set from "deckhand" to
+// "tradingbot" and break `runs-on: deckhand`.
+func TestScaleSetDefaultDoesNotDeriveFromURL(t *testing.T) {
+	cfg, err := Load(writeConfig(t, `
+github:
+  url: https://github.com/roark-dev/tradingBot
+  auth: {token: t}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ScaleSet.Name != "deckhand" {
+		t.Fatalf("nameless tradingBot config got scale set %q, want deckhand (URL-derivation on load would break its CI)", cfg.ScaleSet.Name)
 	}
 }
 
