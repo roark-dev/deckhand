@@ -1,0 +1,36 @@
+name: dogfood
+
+# deckhand runs its own build+tests on a self-hosted deckhand runner — proof
+# the tool works, by using it. Kept separate from ci.yml so the required
+# checks stay on GitHub-hosted runners.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-on-deckhand:
+    # SECURITY: this is a PUBLIC repo, so only same-repo branches (the
+    # maintainer's own) ever run on the self-hosted Mac — never fork PRs,
+    # whose code we must not execute here.
+    if: >-
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: deckhand
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - name: build + test
+        env:
+          # The stock actions-runner image has no gcc, so cgo (and therefore
+          # -race) is unavailable; a custom image would restore full parity.
+          CGO_ENABLED: "0"
+        run: |
+          go build ./...
+          go test ./...
