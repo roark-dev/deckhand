@@ -230,12 +230,11 @@ func (m model) View() string {
 		chips = append(chips, errStyle.Render(truncate(m.err.Error(), 60)))
 	}
 	fmt.Fprintf(&b, "%s  %s\n", titleStyle.Render("deckhand"), strings.Join(chips, "  "))
-	// Header, in workflow-author terms: which repo/org this daemon serves,
-	// what to write in `runs-on:`, and how long the GitHub connection has
-	// been up.
+	// Header: which repo/org this daemon serves and how long the GitHub
+	// connection has been up.
 	fmt.Fprintf(&b, "%s\n", dimStyle.Render(fmt.Sprintf(
-		"serving %s  ·  runs-on: %s  ·  connected %s",
-		strings.TrimPrefix(br.GitHubURL, "https://github.com/"), br.ScaleSetName, ageOrDash(br.SessionAgeSec))))
+		"serving %s  ·  connected %s",
+		strings.TrimPrefix(br.GitHubURL, "https://github.com/"), ageOrDash(br.SessionAgeSec))))
 	// Aggregate CPU/memory in use across all running slots, against the host
 	// totals (sampled off a background ticker in the daemon).
 	if r := st.Resources; r.OK && r.CPUCores > 0 && r.MemTotalBytes > 0 {
