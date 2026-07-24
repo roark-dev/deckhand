@@ -19,6 +19,7 @@ import (
 
 var (
 	titleStyle  = lipgloss.NewStyle().Bold(true)
+	plainStyle  = lipgloss.NewStyle() // no-op: renders text at the default fg, no ANSI
 	dimStyle    = lipgloss.NewStyle().Faint(true)
 	okStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	warnStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
@@ -238,19 +239,41 @@ func (m model) View() string {
 
 	// Slot table. Cells are padded to their column width BEFORE styling —
 	// ANSI escape codes have zero display width but count in %-Ns padding,
-	// which is exactly the misalignment styling-then-padding causes.
-	fmt.Fprintln(&b, headerRow.Render(fmt.Sprintf("  %-6s %-11s %-10s %s", "SLOT", "STATE", "ELAPSED", "JOB")))
+	// which is exactly the misalignment styling-then-padding causes. The JOB
+	// column is sized to its widest cell (first pass) so the REPO column that
+	// follows lines up across rows; jobColCap bounds it so one long name or
+	// error can't shove REPO off-screen.
+	const jobColCap = 24
+	type rendered struct {
+		index      int
+		stateText  string
+		stateStyle lipgloss.Style
+		elapsed    string
+		job        jobCol
+	}
+	rows := make([]rendered, 0, len(st.Slots))
+	jobW := len("JOB")
 	for _, s := range st.Slots {
-		stateText, stateStyle, detail := slotCell(s)
+		stateText, stateStyle, job := slotCell(s)
 		elapsed := time.Since(s.Since).Round(time.Second).String()
 		if s.State == slots.Running && s.Job != nil {
 			elapsed = time.Since(s.Job.StartedAt).Round(time.Second).String()
 		}
-		fmt.Fprintf(&b, "  %-6d %s %-10s %s\n",
-			s.Index,
-			stateStyle.Render(fmt.Sprintf("%-11s", stateText)),
-			elapsed,
-			detail)
+		if w := len(job.text); w <= jobColCap && w > jobW {
+			jobW = w
+		}
+		rows = append(rows, rendered{s.Index, stateText, stateStyle, elapsed, job})
+	}
+	fmt.Fprintln(&b, headerRow.Render(fmt.Sprintf("  %-6s %-11s %-10s %-*s %s", "SLOT", "STATE", "ELAPSED", jobW, "JOB", "REPO")))
+	for _, r := range rows {
+		state := r.stateStyle.Render(fmt.Sprintf("%-11s", r.stateText))
+		if r.job.repo != "" {
+			// Pad (truncating if needed) the JOB cell to jobW so REPO aligns.
+			job := r.job.style.Render(fmt.Sprintf("%-*s", jobW, truncate(r.job.text, jobW)))
+			fmt.Fprintf(&b, "  %-6d %s %-10s %s %s\n", r.index, state, r.elapsed, job, dimStyle.Render(r.job.repo))
+			continue
+		}
+		fmt.Fprintf(&b, "  %-6d %s %-10s %s\n", r.index, state, r.elapsed, r.job.style.Render(r.job.text))
 	}
 
 	// Events
@@ -284,32 +307,42 @@ func (m model) View() string {
 	return b.String()
 }
 
+// jobCol is the JOB/REPO portion of a slot row. text and repo are PLAIN
+// (unstyled) so the caller can pad them to the column width BEFORE styling —
+// ANSI codes have zero display width but count in %-Ns padding. repo is empty
+// unless the slot is running a job; text is the job name, a status line, or a
+// (truncated) error, rendered with style.
+type jobCol struct {
+	text  string
+	style lipgloss.Style
+	repo  string
+}
+
 // slotCell returns the STATE cell's plain text (padded by the caller, THEN
-// styled — see the table comment), its style, and the JOB column content.
-func slotCell(s slots.Slot) (string, lipgloss.Style, string) {
+// styled — see the table comment), its style, and the JOB/REPO columns.
+func slotCell(s slots.Slot) (string, lipgloss.Style, jobCol) {
 	stateText := string(s.State)
 	if s.Drain && s.State != slots.Draining {
 		stateText += "*" // drain-marked: finishes its work, then removed
 	}
 	switch s.State {
 	case slots.Running:
-		detail := ""
 		if s.Job != nil {
-			detail = fmt.Sprintf("%s  %s", sanitizeCell(s.Job.DisplayName), dimStyle.Render(sanitizeCell(s.Job.Repo)))
+			return "busy", busyStyle, jobCol{sanitizeCell(s.Job.DisplayName), plainStyle, sanitizeCell(s.Job.Repo)}
 		}
-		return "busy", busyStyle, detail
+		return "busy", busyStyle, jobCol{}
 	case slots.Ready:
-		return stateText, okStyle, dimStyle.Render("waiting for a job")
+		return stateText, okStyle, jobCol{text: "waiting for a job", style: dimStyle}
 	case slots.Starting:
-		return stateText, warnStyle, ""
+		return stateText, warnStyle, jobCol{}
 	case slots.Reaping:
-		return stateText, dimStyle, ""
+		return stateText, dimStyle, jobCol{}
 	case slots.Errored:
-		return "error", errStyle, errStyle.Render(truncate(s.Err, 60))
+		return "error", errStyle, jobCol{text: truncate(s.Err, 60), style: errStyle}
 	case slots.Draining:
-		return stateText, warnStyle, dimStyle.Render("removed when idle")
+		return stateText, warnStyle, jobCol{text: "removed when idle", style: dimStyle}
 	default:
-		return stateText, dimStyle, ""
+		return stateText, dimStyle, jobCol{}
 	}
 }
 
