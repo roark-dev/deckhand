@@ -229,27 +229,29 @@ func (m model) View() string {
 		chips = append(chips, errStyle.Render(truncate(m.err.Error(), 60)))
 	}
 	fmt.Fprintf(&b, "%s  %s\n", titleStyle.Render("deckhand"), strings.Join(chips, "  "))
-	fmt.Fprintf(&b, "%s\n\n", dimStyle.Render(fmt.Sprintf("scale set %q on %s — session %s", br.ScaleSetName, br.GitHubURL, ageOrDash(br.SessionAgeSec))))
+	// Header, in workflow-author terms: which repo/org this daemon serves,
+	// what to write in `runs-on:`, and how long the GitHub connection has
+	// been up.
+	fmt.Fprintf(&b, "%s\n\n", dimStyle.Render(fmt.Sprintf(
+		"serving %s  ·  runs-on: %s  ·  connected %s",
+		strings.TrimPrefix(br.GitHubURL, "https://github.com/"), br.ScaleSetName, ageOrDash(br.SessionAgeSec))))
 
-	// Slot table
-	busy := 0
-	fmt.Fprintln(&b, headerRow.Render(fmt.Sprintf("  %-5s %-9s %-8s %s", "SLOT", "STATE", "ELAPSED", "JOB")))
+	// Slot table. Cells are padded to their column width BEFORE styling —
+	// ANSI escape codes have zero display width but count in %-Ns padding,
+	// which is exactly the misalignment styling-then-padding causes.
+	fmt.Fprintln(&b, headerRow.Render(fmt.Sprintf("  %-6s %-11s %-10s %s", "SLOT", "STATE", "ELAPSED", "JOB")))
 	for _, s := range st.Slots {
-		stateStr, detail := renderSlot(s)
-		if s.State == slots.Running {
-			busy++
-		}
+		stateText, stateStyle, detail := slotCell(s)
 		elapsed := time.Since(s.Since).Round(time.Second).String()
 		if s.State == slots.Running && s.Job != nil {
 			elapsed = time.Since(s.Job.StartedAt).Round(time.Second).String()
 		}
-		fmt.Fprintf(&b, "  %-5d %-9s %-8s %s\n", s.Index, stateStr, elapsed, detail)
+		fmt.Fprintf(&b, "  %-6d %s %-10s %s\n",
+			s.Index,
+			stateStyle.Render(fmt.Sprintf("%-11s", stateText)),
+			elapsed,
+			detail)
 	}
-	fmt.Fprintf(&b, "\n  %d/%d busy   jobs %s ok / %s failed   zombies reclaimed %d\n",
-		busy, br.Target,
-		okStyle.Render(fmt.Sprint(st.Counters.Completed)),
-		errStyle.Render(fmt.Sprint(st.Counters.Failed)),
-		st.Counters.ZombiesReclaimed)
 
 	// Events
 	fmt.Fprintln(&b, "\n"+dimStyle.Render(strings.Repeat("─", max(20, m.width-2))))
@@ -282,26 +284,32 @@ func (m model) View() string {
 	return b.String()
 }
 
-func renderSlot(s slots.Slot) (string, string) {
+// slotCell returns the STATE cell's plain text (padded by the caller, THEN
+// styled — see the table comment), its style, and the JOB column content.
+func slotCell(s slots.Slot) (string, lipgloss.Style, string) {
+	stateText := string(s.State)
+	if s.Drain && s.State != slots.Draining {
+		stateText += "*" // drain-marked: finishes its work, then removed
+	}
 	switch s.State {
 	case slots.Running:
 		detail := ""
 		if s.Job != nil {
 			detail = fmt.Sprintf("%s  %s", sanitizeCell(s.Job.DisplayName), dimStyle.Render(sanitizeCell(s.Job.Repo)))
 		}
-		return busyStyle.Render("busy"), detail
+		return "busy", busyStyle, detail
 	case slots.Ready:
-		return okStyle.Render("ready"), dimStyle.Render("waiting for a job")
+		return stateText, okStyle, dimStyle.Render("waiting for a job")
 	case slots.Starting:
-		return warnStyle.Render("starting"), ""
+		return stateText, warnStyle, ""
 	case slots.Reaping:
-		return dimStyle.Render("reaping"), ""
+		return stateText, dimStyle, ""
 	case slots.Errored:
-		return errStyle.Render("error"), errStyle.Render(truncate(s.Err, 60))
+		return "error", errStyle, errStyle.Render(truncate(s.Err, 60))
 	case slots.Draining:
-		return warnStyle.Render("draining"), dimStyle.Render("removed when idle")
+		return stateText, warnStyle, dimStyle.Render("removed when idle")
 	default:
-		return dimStyle.Render("idle"), ""
+		return stateText, dimStyle, ""
 	}
 }
 

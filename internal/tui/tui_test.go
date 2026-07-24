@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -28,20 +29,75 @@ func testStatus() *broker.Status {
 	}
 }
 
-func TestViewRendersSlotsAndCounters(t *testing.T) {
+func TestViewRendersSlots(t *testing.T) {
 	m := model{status: testStatus(), width: 100}
 	out := m.View()
 	for _, want := range []string{
 		"deckhand", "test-shard-1", "me/repo",
 		"busy", "error", "spawn failed: boom",
-		"1/2 busy", "5", // completed counter
+		"serving me/repo", "runs-on: deckhand", // header in workflow-author terms
 		"[+/-] slots",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("view missing %q\n%s", want, out)
 		}
 	}
+	// The counters bar was deliberately removed (operator feedback): the
+	// table + events pane are the dashboard.
+	if strings.Contains(out, "zombies reclaimed") || strings.Contains(out, "busy   jobs") {
+		t.Error("counters bar should not be rendered")
+	}
 }
+
+// Styling must never shift columns: cells are padded before ANSI styling, so
+// a styled state cell occupies exactly the same display width as a plain one.
+func TestTableColumnsAlignAcrossStyledStates(t *testing.T) {
+	m := model{status: testStatus(), width: 120}
+	out := m.View()
+	var elapsedCols []int
+	for _, line := range strings.Split(out, "\n") {
+		plain := stripANSI(line)
+		if !strings.HasPrefix(strings.TrimSpace(plain), "0") && !strings.HasPrefix(strings.TrimSpace(plain), "1") {
+			continue
+		}
+		// Row shape: "  <slot> <state-padded-11> <elapsed> ..."; the elapsed
+		// column starts at a fixed offset when padding is display-width.
+		if idx := strings.Index(plain, "s "); idx > 0 { // crude: elapsed like "45s"/"1m15s"
+			elapsedCols = append(elapsedCols, elapsedStart(plain))
+		}
+	}
+	if len(elapsedCols) < 2 {
+		t.Fatalf("expected at least 2 slot rows, got %d\n%s", len(elapsedCols), out)
+	}
+	for _, c := range elapsedCols[1:] {
+		if c != elapsedCols[0] {
+			t.Fatalf("elapsed column drifts across styled rows: %v\n%s", elapsedCols, out)
+		}
+	}
+}
+
+// elapsedStart finds the column where the third field begins on a plain row.
+func elapsedStart(plain string) int {
+	fields := 0
+	inField := false
+	for i, r := range plain {
+		if r != ' ' && !inField {
+			fields++
+			inField = true
+			if fields == 3 {
+				return i
+			}
+		} else if r == ' ' {
+			inField = false
+		}
+		_ = i
+	}
+	return -1
+}
+
+var ansiRe = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+func stripANSI(s string) string { return ansiRe.ReplaceAllString(s, "") }
 
 func TestViewStates(t *testing.T) {
 	st := testStatus()
@@ -86,10 +142,15 @@ func TestRenderSlotAllStates(t *testing.T) {
 		slots.Draining: "draining",
 	}
 	for state, want := range cases {
-		got, _ := renderSlot(slots.Slot{State: state})
+		got, _, _ := slotCell(slots.Slot{State: state})
 		if !strings.Contains(got, want) {
 			t.Errorf("state %s renders %q, want to contain %q", state, got, want)
 		}
+	}
+	// Drain-marked slots carry a visible marker so a ready-but-leaving
+	// runner is distinguishable from a plain ready one.
+	if got, _, _ := slotCell(slots.Slot{State: slots.Ready, Drain: true}); got != "ready*" {
+		t.Errorf("drain-marked ready slot renders %q, want ready*", got)
 	}
 }
 
