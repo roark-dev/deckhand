@@ -1,0 +1,5 @@
+self-hosted-runner:
+  # Custom runner-scale-set label used by the dogfood workflow (deckhand runs
+  # its own build+tests on a self-hosted deckhand runner).
+  labels:
+    - deckhand
