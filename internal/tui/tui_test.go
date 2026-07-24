@@ -77,6 +77,46 @@ func TestTableColumnsAlignAcrossStyledStates(t *testing.T) {
 }
 
 // elapsedStart finds the column where the third field begins on a plain row.
+// The REPO column has its own header and lines up across rows whose job names
+// differ in length (operator feedback: it used to be header-less and ragged).
+func TestRepoColumnHasHeaderAndAligns(t *testing.T) {
+	st := testStatus()
+	st.Slots = []slots.Slot{
+		{Index: 0, State: slots.Running, Since: time.Now(), Job: &slots.Job{
+			DisplayName: "static-checks", Repo: "me/repo", StartedAt: time.Now()}},
+		{Index: 1, State: slots.Running, Since: time.Now(), Job: &slots.Job{
+			DisplayName: "test (3)", Repo: "me/repo", StartedAt: time.Now()}},
+		{Index: 2, State: slots.Ready, Since: time.Now()},
+	}
+	out := (model{status: st, width: 120}).View()
+
+	var headerRepoCol int = -1
+	var dataRepoCols []int
+	for _, line := range strings.Split(out, "\n") {
+		plain := stripANSI(line)
+		switch {
+		case strings.Contains(plain, "JOB") && strings.Contains(plain, "REPO"):
+			headerRepoCol = strings.Index(plain, "REPO")
+		case strings.Contains(plain, "busy") && strings.Contains(plain, "me/repo"):
+			dataRepoCols = append(dataRepoCols, strings.Index(plain, "me/repo"))
+		}
+	}
+	if headerRepoCol < 0 {
+		t.Fatalf("no REPO header found\n%s", out)
+	}
+	if len(dataRepoCols) != 2 {
+		t.Fatalf("expected 2 repo rows, got %d\n%s", len(dataRepoCols), out)
+	}
+	for _, c := range dataRepoCols {
+		if c != dataRepoCols[0] {
+			t.Fatalf("repo column drifts across rows: %v\n%s", dataRepoCols, out)
+		}
+	}
+	if dataRepoCols[0] != headerRepoCol {
+		t.Fatalf("REPO header col %d != data repo col %d\n%s", headerRepoCol, dataRepoCols[0], out)
+	}
+}
+
 func elapsedStart(plain string) int {
 	fields := 0
 	inField := false
