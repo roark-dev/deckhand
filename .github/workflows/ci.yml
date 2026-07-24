@@ -52,6 +52,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: go mod tidy
       - name: go.mod / go.sum are tidy
-        run: git diff --exit-status
+        run: |
+          go mod tidy
+          if [ -n "$(git status --porcelain go.mod go.sum)" ]; then
+            echo "::error::go.mod/go.sum are not tidy — run 'go mod tidy' and commit the result"
+            git diff -- go.mod go.sum
+            exit 1
+          fi
