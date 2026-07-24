@@ -30,6 +30,24 @@ func Slug(githubURL string) string {
 	return strings.Trim(b.String(), "-")
 }
 
+// DefaultScaleSetName derives the runs-on label from a GitHub URL — the repo
+// name (or the org, for an org-level URL), lowercased. Scale sets are scoped to
+// the repo, so keying the name to the repo means users never have to invent
+// one, and it can't collide with another repo's.
+func DefaultScaleSetName(githubURL string) string {
+	path := strings.TrimPrefix(githubURL, "https://github.com/")
+	path = strings.TrimPrefix(path, "http://github.com/")
+	path = strings.TrimSuffix(strings.Trim(path, "/"), ".git")
+	if i := strings.LastIndex(path, "/"); i >= 0 {
+		path = path[i+1:] // org/repo -> repo
+	}
+	path = strings.ToLower(path)
+	if path == "" {
+		return "deckhand"
+	}
+	return path
+}
+
 // InstanceOptions selects which instance ResolvePaths targets.
 type InstanceOptions struct {
 	Instance string // explicit --instance / DECKHAND_INSTANCE (beats auto-detect)
