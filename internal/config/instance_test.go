@@ -22,6 +22,21 @@ func TestSlug(t *testing.T) {
 	}
 }
 
+func TestDefaultScaleSetName(t *testing.T) {
+	cases := map[string]string{
+		"https://github.com/roark-dev/deckhand":   "deckhand",
+		"https://github.com/roark-dev/tradingBot": "tradingbot",
+		"https://github.com/roark-dev":            "roark-dev", // org-level URL
+		"https://github.com/Acme/My-Api.git":      "my-api",
+		"":                                        "deckhand", // fallback
+	}
+	for in, want := range cases {
+		if got := DefaultScaleSetName(in); got != want {
+			t.Errorf("DefaultScaleSetName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // A repo whose git remote differs from the legacy flat config resolves to its
 // own instance dir instead of clobbering the flat one.
 func TestResolvePathsSecondRepoGetsOwnInstance(t *testing.T) {

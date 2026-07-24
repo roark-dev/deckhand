@@ -30,8 +30,8 @@ func TestLoadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ScaleSet.Name != "deckhand" {
-		t.Errorf("default scale set name = %q", cfg.ScaleSet.Name)
+	if cfg.ScaleSet.Name != "repo" { // derived from github.com/me/repo
+		t.Errorf("default scale set name = %q, want repo (derived from the URL)", cfg.ScaleSet.Name)
 	}
 	if cfg.ScaleSet.RunnerGroup != "default" {
 		t.Errorf("default runner group = %q", cfg.ScaleSet.RunnerGroup)

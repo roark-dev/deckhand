@@ -152,7 +152,10 @@ var initCmd = &cobra.Command{
 			return fmt.Errorf("unknown choice %q", choice)
 		}
 
-		name := ask("Scale set name (this is what `runs-on:` will reference)", "deckhand")
+		// The scale set name (the `runs-on:` label) is derived from the repo —
+		// it's scoped to the repo, so there's nothing for the user to invent.
+		name := config.DefaultScaleSetName(url)
+		fmt.Printf("scale set name: %s  (your `runs-on:` label — edit config.yaml to change)\n", name)
 		slotsN := ask("Slots (max concurrent jobs)", strconv.Itoa(4))
 		if askErr != nil {
 			return askErr

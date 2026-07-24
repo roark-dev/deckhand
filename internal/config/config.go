@@ -182,7 +182,7 @@ func Load(path string) (*Config, error) {
 
 func (c *Config) applyDefaults() {
 	if c.ScaleSet.Name == "" {
-		c.ScaleSet.Name = "deckhand"
+		c.ScaleSet.Name = DefaultScaleSetName(c.GitHub.URL)
 	}
 	if c.ScaleSet.RunnerGroup == "" {
 		c.ScaleSet.RunnerGroup = scaleset.DefaultRunnerGroup
