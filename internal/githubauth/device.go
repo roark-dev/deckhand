@@ -19,7 +19,7 @@ import (
 // OAuth app (Settings → Developer settings → OAuth Apps, enable Device Flow,
 // no callback needed) and set this — until then, device login requires
 // passing a client ID explicitly (--oauth-client-id / DECKHAND_OAUTH_CLIENT_ID).
-const DefaultClientID = ""
+const DefaultClientID = "Ov23liUpBIqsqcNgKWaF"
 
 const defaultBaseURL = "https://github.com"
 
