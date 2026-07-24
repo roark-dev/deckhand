@@ -110,13 +110,15 @@ type fakeProvider struct {
 	imageErr   error
 	workerErr  error
 	ncpu       int
+	hostMem    int64
+	stats      map[string]runner.Stats
 	containers map[string]*fakeContainer
 	removed    []string
 	nextID     int
 }
 
 func newFakeProvider() *fakeProvider {
-	return &fakeProvider{containers: map[string]*fakeContainer{}}
+	return &fakeProvider{containers: map[string]*fakeContainer{}, stats: map[string]runner.Stats{}}
 }
 
 func (p *fakeProvider) Ping(context.Context) error {
@@ -224,6 +226,24 @@ func (p *fakeProvider) NCPU(context.Context) (int, error) {
 	return p.ncpu, nil
 }
 
+func (p *fakeProvider) SampleStats(_ context.Context, id string) (runner.Stats, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if s, ok := p.stats[id]; ok {
+		return s, nil
+	}
+	return runner.Stats{}, fmt.Errorf("no stats for %s", id)
+}
+
+func (p *fakeProvider) HostMem(context.Context) (int64, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.hostMem == 0 {
+		return 16 * 1024 * 1024 * 1024, nil
+	}
+	return p.hostMem, nil
+}
+
 func (p *fakeProvider) exitContainer(id string, code int64) {
 	p.mu.Lock()
 	c, ok := p.containers[id]
@@ -283,6 +303,7 @@ func testBroker(t *testing.T, slotCount, warm int) (*Broker, *fakeGH, *fakeProvi
 		pruneAge:        time.Hour,
 		wakeSlack:       30 * time.Second,
 		stopPollEvery:   5 * time.Millisecond,
+		resourceEvery:   time.Hour, // sampled explicitly via sampleResourcesOnce
 	}
 	t.Cleanup(func() {
 		// Release any watcher goroutines blocked in fake Wait.
@@ -301,6 +322,62 @@ func testBroker(t *testing.T, slotCount, warm int) (*Broker, *fakeGH, *fakeProvi
 
 func newBrokerForTest(cfg *config.Config, paths config.Paths, provider containerProvider, gh ghAPI) *Broker {
 	return newBroker(cfg, paths, slog.New(slog.DiscardHandler), bus.New(), provider, gh, false)
+}
+
+func TestSampleResourcesAggregates(t *testing.T) {
+	b, _, prov := testBroker(t, 2, 0)
+
+	// Stage two running slots backed by containers with known stats.
+	i0, _, ok0 := b.slots.Acquire()
+	i1, _, ok1 := b.slots.Acquire()
+	if !ok0 || !ok1 {
+		t.Fatal("could not acquire two slots")
+	}
+	b.slots.MutateIndex(i0, func(s *slots.Slot) { s.State = slots.Running; s.ContainerID = "cid-a" })
+	b.slots.MutateIndex(i1, func(s *slots.Slot) { s.State = slots.Running; s.ContainerID = "cid-b" })
+	prov.mu.Lock()
+	prov.stats["cid-a"] = runner.Stats{CPUCores: 1.5, MemBytes: 500 * 1024 * 1024}
+	prov.stats["cid-b"] = runner.Stats{CPUCores: 0.5, MemBytes: 300 * 1024 * 1024}
+	prov.mu.Unlock()
+
+	b.sampleResourcesOnce(context.Background())
+
+	r := b.Status().Resources
+	if !r.OK {
+		t.Fatal("resources not marked OK after a sample")
+	}
+	if r.CPUCoresUsed < 1.999 || r.CPUCoresUsed > 2.001 {
+		t.Errorf("CPUCoresUsed = %v, want ~2.0 (1.5 + 0.5)", r.CPUCoresUsed)
+	}
+	if want := int64(800 * 1024 * 1024); r.MemUsedBytes != want {
+		t.Errorf("MemUsedBytes = %d, want %d", r.MemUsedBytes, want)
+	}
+	if r.CPUCores != 8 {
+		t.Errorf("host CPUCores = %d, want 8", r.CPUCores)
+	}
+	if want := int64(16 * 1024 * 1024 * 1024); r.MemTotalBytes != want {
+		t.Errorf("host MemTotalBytes = %d, want %d", r.MemTotalBytes, want)
+	}
+}
+
+// A container that vanishes mid-sample (SampleStats errors) drops out of the
+// sum instead of failing the whole reading.
+func TestSampleResourcesSkipsErroringContainer(t *testing.T) {
+	b, _, prov := testBroker(t, 2, 0)
+	i0, _, _ := b.slots.Acquire()
+	i1, _, _ := b.slots.Acquire()
+	b.slots.MutateIndex(i0, func(s *slots.Slot) { s.State = slots.Running; s.ContainerID = "cid-a" })
+	b.slots.MutateIndex(i1, func(s *slots.Slot) { s.State = slots.Running; s.ContainerID = "gone" })
+	prov.mu.Lock()
+	prov.stats["cid-a"] = runner.Stats{CPUCores: 1.0, MemBytes: 200 * 1024 * 1024}
+	prov.mu.Unlock() // "gone" has no stats -> SampleStats errors
+
+	b.sampleResourcesOnce(context.Background())
+
+	r := b.Status().Resources
+	if !r.OK || r.CPUCoresUsed < 0.999 || r.CPUCoresUsed > 1.001 {
+		t.Errorf("want ~1.0 core from the one live container, got ok=%v cores=%v", r.OK, r.CPUCoresUsed)
+	}
 }
 
 func desire(t *testing.T, b *Broker, assigned int) int {

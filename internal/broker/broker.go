@@ -71,6 +71,8 @@ type containerProvider interface {
 	ListManaged(ctx context.Context) ([]runner.Managed, error)
 	PruneExited(ctx context.Context, olderThan time.Duration) (int, error)
 	NCPU(ctx context.Context) (int, error)
+	SampleStats(ctx context.Context, containerID string) (runner.Stats, error)
+	HostMem(ctx context.Context) (int64, error)
 }
 
 // timings collects every interval/threshold so tests can compress time.
@@ -85,6 +87,7 @@ type timings struct {
 	pruneAge        time.Duration // exited-container prune age
 	wakeSlack       time.Duration // extra wall-clock beyond planned sleep = suspend
 	stopPollEvery   time.Duration // drain-stop completion poll cadence
+	resourceEvery   time.Duration // CPU/memory usage sampling cadence
 }
 
 func defaultTimings() timings {
@@ -99,6 +102,7 @@ func defaultTimings() timings {
 		pruneAge:        10 * time.Minute,
 		wakeSlack:       30 * time.Second,
 		stopPollEvery:   2 * time.Second,
+		resourceEvery:   2 * time.Second,
 	}
 }
 
@@ -108,6 +112,16 @@ func defaultTimings() timings {
 type persistedState struct {
 	ScaleSetID int `json:"scale_set_id"`
 	SlotTarget int `json:"slot_target"`
+}
+
+// resourceSnapshot is the latest CPU/memory usage summed across running slots,
+// alongside the host totals. ok stays false until the first successful sample.
+type resourceSnapshot struct {
+	ok            bool
+	cpuCoresUsed  float64
+	memUsedBytes  int64
+	memTotalBytes int64
+	ncpu          int
 }
 
 type Broker struct {
@@ -142,6 +156,11 @@ type Broker struct {
 
 	listener atomic.Pointer[listener.Listener]
 	counters counters
+
+	// resMu guards res, the latest CPU/memory usage sampled off a background
+	// ticker so Status() never blocks on docker stats calls.
+	resMu sync.Mutex
+	res   resourceSnapshot
 
 	// takeover permits attaching to an existing scale set whose ID we did not
 	// persist (i.e. possibly another broker's).
@@ -316,6 +335,7 @@ func (b *Broker) Run(ctx context.Context) error {
 
 	go b.sweeper(ctx)
 	go b.dockerMonitor(ctx)
+	go b.resourceSampler(ctx)
 
 	// Session/listener loop with jittered backoff and sleep/wake detection.
 	backoff := time.Second
@@ -594,6 +614,78 @@ func (b *Broker) dockerMonitor(ctx context.Context) {
 			b.reconcile(ctx) // clears dockerDown on success
 		}
 	}
+}
+
+// resourceSampler refreshes the cached CPU/memory usage on a ticker. It is
+// kept off the Status path because a stats read blocks ~1s per container (see
+// runner.SampleStats) and Status() must stay instant.
+func (b *Broker) resourceSampler(ctx context.Context) {
+	tick := time.NewTicker(b.tm.resourceEvery)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+		b.sampleResourcesOnce(ctx)
+	}
+}
+
+// sampleResourcesOnce sums CPU/memory across the running slots' containers and
+// refreshes the host totals (fetched once, then reused — they don't change).
+func (b *Broker) sampleResourcesOnce(ctx context.Context) {
+	if b.isDockerDown() {
+		return // keep the last good sample rather than flapping to zero
+	}
+	var ids []string
+	for _, s := range b.slots.Snapshot() {
+		if s.State == slots.Running && s.ContainerID != "" {
+			ids = append(ids, s.ContainerID)
+		}
+	}
+
+	var (
+		wg    sync.WaitGroup
+		mu    sync.Mutex
+		cores float64
+		mem   int64
+	)
+	for _, id := range ids {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			st, err := b.provider.SampleStats(cctx, id)
+			if err != nil {
+				return // a container that exited mid-sample just drops out of the sum
+			}
+			mu.Lock()
+			cores += st.CPUCores
+			mem += st.MemBytes
+			mu.Unlock()
+		}(id)
+	}
+	wg.Wait()
+
+	b.resMu.Lock()
+	memTotal, ncpu := b.res.memTotalBytes, b.res.ncpu
+	b.resMu.Unlock()
+	if memTotal == 0 {
+		if v, err := b.provider.HostMem(ctx); err == nil {
+			memTotal = v
+		}
+	}
+	if ncpu == 0 {
+		if v, err := b.provider.NCPU(ctx); err == nil {
+			ncpu = v
+		}
+	}
+
+	b.resMu.Lock()
+	b.res = resourceSnapshot{ok: true, cpuCoresUsed: cores, memUsedBytes: mem, memTotalBytes: memTotal, ncpu: ncpu}
+	b.resMu.Unlock()
 }
 
 // sweeper is the periodic maintenance pass: prune debris, reconcile tracking,

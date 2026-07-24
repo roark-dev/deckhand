@@ -49,6 +49,40 @@ func TestViewRendersSlots(t *testing.T) {
 	}
 }
 
+func TestViewRendersResourceUsage(t *testing.T) {
+	st := testStatus()
+	st.Resources = broker.ResourceUsage{
+		OK: true, CPUCoresUsed: 2.3, CPUCores: 8,
+		MemUsedBytes: 1717986918 /*~1.6G*/, MemTotalBytes: 16 * 1024 * 1024 * 1024,
+	}
+	out := (model{status: st, width: 100}).View()
+	for _, want := range []string{"usage:", "2.3 / 8 CPU cores", "1.6G", "16.0G"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("resource line missing %q\n%s", want, out)
+		}
+	}
+	// No sample yet -> the line is omitted, not rendered with zeros/dashes.
+	st.Resources = broker.ResourceUsage{}
+	if out := (model{status: st, width: 100}).View(); strings.Contains(out, "usage:") {
+		t.Errorf("resource line should be hidden before first sample\n%s", out)
+	}
+}
+
+func TestHumanBytes(t *testing.T) {
+	cases := map[int64]string{
+		512:                     "512B",
+		1024:                    "1.0K",
+		1610612736:              "1.5G",
+		16 * 1024 * 1024 * 1024: "16.0G",
+		512 * 1024 * 1024:       "512.0M",
+	}
+	for n, want := range cases {
+		if got := humanBytes(n); got != want {
+			t.Errorf("humanBytes(%d) = %q, want %q", n, got, want)
+		}
+	}
+}
+
 // Styling must never shift columns: cells are padded before ANSI styling, so
 // a styled state cell occupies exactly the same display width as a plain one.
 func TestTableColumnsAlignAcrossStyledStates(t *testing.T) {
