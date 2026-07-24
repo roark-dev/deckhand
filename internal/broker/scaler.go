@@ -318,20 +318,50 @@ func (b *Broker) watchContainer(ctx context.Context, index int, runnerName, cont
 }
 
 func (b *Broker) reapUnreported(ctx context.Context, index int, runnerName, containerID string, exitCode int64) {
-	logs, _ := b.provider.LogsTail(ctx, containerID, 50)
+	// Only a runner that was actually running a GitHub-reported job counts as a
+	// failure when it exits without a JobCompleted. An idle runner that recycles
+	// (or an adopted-as-busy placeholder) never had a job to fail — counting it
+	// inflates the failure metric and cries wolf.
+	s, _ := b.slots.Get(index)
+	realJob := hadRealJob(s)
+
+	var logs string
+	if realJob {
+		logs, _ = b.provider.LogsTail(ctx, containerID, 50)
+	}
 	_ = b.provider.Remove(ctx, containerID)
-	if b.slots.Free(index, runnerName) {
-		b.counters.failed.Add(1)
-		msg := fmt.Sprintf("runner %s exited (code %d) without a job-completed report", runnerName, exitCode)
-		if exitCode == 137 {
-			msg += " — killed (OOM?)"
-		}
-		b.event(bus.Error, index, msg)
-		if logs != "" {
-			b.event(bus.Error, index, "last output: "+tailLines(logs, 5))
+	if !b.slots.Free(index, runnerName) {
+		return
+	}
+	if !realJob {
+		// No job was lost, so this is not a failed job. A clean exit is routine
+		// recycling; a non-zero code (e.g. 137 OOM) still deserves a WARN so a
+		// resource problem stays visible without polluting the job-failure count.
+		if exitCode == 0 {
+			b.event(bus.Info, index, fmt.Sprintf("idle runner %s exited — recycled", runnerName))
+		} else {
+			b.event(bus.Warn, index, fmt.Sprintf("idle runner %s exited (code %d) with no job — recycled, not counted as a failed job", runnerName, exitCode))
 		}
 		b.poke()
+		return
 	}
+	b.counters.failed.Add(1)
+	msg := fmt.Sprintf("runner %s exited (code %d) without a job-completed report", runnerName, exitCode)
+	if exitCode == 137 {
+		msg += " — killed (OOM?)"
+	}
+	b.event(bus.Error, index, msg)
+	if logs != "" {
+		b.event(bus.Error, index, "last output: "+tailLines(logs, 5))
+	}
+	b.poke()
+}
+
+// hadRealJob reports whether a slot was running a GitHub-reported job (as
+// opposed to idle, or adopted-as-busy with a synthetic placeholder that carries
+// no RequestID). Only a real job's unreported exit is a failure.
+func hadRealJob(s slots.Slot) bool {
+	return s.State == slots.Running && s.Job != nil && s.Job.RequestID != 0
 }
 
 func (b *Broker) ownsSlot(index int, runnerName string) bool {
