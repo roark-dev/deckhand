@@ -35,12 +35,17 @@ func TestViewRendersSlots(t *testing.T) {
 	for _, want := range []string{
 		"deckhand", "test-shard-1", "me/repo",
 		"busy", "error", "spawn failed: boom",
-		"serving me/repo", "runs-on: deckhand", // header in workflow-author terms
+		"serving me/repo", // header in workflow-author terms
 		"[+/-] slots",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("view missing %q\n%s", want, out)
 		}
+	}
+	// The runs-on: field was removed (it restated the scale-set name); ensure
+	// it doesn't creep back into the header.
+	if strings.Contains(out, "runs-on:") {
+		t.Errorf("runs-on: field should no longer be in the header\n%s", out)
 	}
 	// The counters bar was deliberately removed (operator feedback): the
 	// table + events pane are the dashboard.
