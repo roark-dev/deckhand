@@ -182,7 +182,13 @@ func Load(path string) (*Config, error) {
 
 func (c *Config) applyDefaults() {
 	if c.ScaleSet.Name == "" {
-		c.ScaleSet.Name = DefaultScaleSetName(c.GitHub.URL)
+		// STABLE default — do NOT derive from the URL here. Existing configs
+		// written without a name relied on "deckhand" (e.g. tradingBot, whose
+		// workflows use `runs-on: deckhand`); deriving "tradingbot" on load would
+		// silently rename its scale set and break its CI. `deckhand init` writes
+		// the repo-derived name (DefaultScaleSetName) explicitly for new setups,
+		// so this fallback only ever applies to hand-written nameless configs.
+		c.ScaleSet.Name = "deckhand"
 	}
 	if c.ScaleSet.RunnerGroup == "" {
 		c.ScaleSet.RunnerGroup = scaleset.DefaultRunnerGroup
