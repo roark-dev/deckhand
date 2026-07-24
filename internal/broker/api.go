@@ -15,10 +15,21 @@ import (
 // Status is the control-API view of the daemon; it drives the TUI and
 // `deckhand status`.
 type Status struct {
-	Broker   Info          `json:"broker"`
-	Docker   DockerStatus  `json:"docker"`
-	Slots    []slots.Slot  `json:"slots"`
-	Counters CounterValues `json:"counters"`
+	Broker    Info          `json:"broker"`
+	Docker    DockerStatus  `json:"docker"`
+	Slots     []slots.Slot  `json:"slots"`
+	Counters  CounterValues `json:"counters"`
+	Resources ResourceUsage `json:"resources"`
+}
+
+// ResourceUsage is CPU/memory summed across running slots against the host
+// totals, sampled off a background ticker. OK is false until the first sample.
+type ResourceUsage struct {
+	OK            bool    `json:"ok"`
+	CPUCoresUsed  float64 `json:"cpu_cores_used"`
+	CPUCores      int     `json:"cpu_cores"`
+	MemUsedBytes  int64   `json:"mem_used_bytes"`
+	MemTotalBytes int64   `json:"mem_total_bytes"`
 }
 
 type Info struct {
@@ -73,10 +84,20 @@ func (b *Broker) Status() Status {
 	}
 	dockerOK := !b.dockerDown
 	b.mu.Unlock()
+	b.resMu.Lock()
+	res := b.res
+	b.resMu.Unlock()
 	return Status{
 		Broker: st,
 		Docker: DockerStatus{OK: dockerOK},
 		Slots:  b.slots.Snapshot(),
+		Resources: ResourceUsage{
+			OK:            res.ok,
+			CPUCoresUsed:  res.cpuCoresUsed,
+			CPUCores:      res.ncpu,
+			MemUsedBytes:  res.memUsedBytes,
+			MemTotalBytes: res.memTotalBytes,
+		},
 		Counters: CounterValues{
 			Completed:        b.counters.completed.Load(),
 			Failed:           b.counters.failed.Load(),

@@ -232,9 +232,17 @@ func (m model) View() string {
 	// Header, in workflow-author terms: which repo/org this daemon serves,
 	// what to write in `runs-on:`, and how long the GitHub connection has
 	// been up.
-	fmt.Fprintf(&b, "%s\n\n", dimStyle.Render(fmt.Sprintf(
+	fmt.Fprintf(&b, "%s\n", dimStyle.Render(fmt.Sprintf(
 		"serving %s  ·  runs-on: %s  ·  connected %s",
 		strings.TrimPrefix(br.GitHubURL, "https://github.com/"), br.ScaleSetName, ageOrDash(br.SessionAgeSec))))
+	// Aggregate CPU/memory in use across all running slots, against the host
+	// totals (sampled off a background ticker in the daemon).
+	if r := st.Resources; r.OK && r.CPUCores > 0 && r.MemTotalBytes > 0 {
+		fmt.Fprintf(&b, "%s\n", dimStyle.Render(fmt.Sprintf(
+			"usage: %.1f / %d CPU cores  ·  %s / %s memory",
+			r.CPUCoresUsed, r.CPUCores, humanBytes(r.MemUsedBytes), humanBytes(r.MemTotalBytes))))
+	}
+	b.WriteByte('\n')
 
 	// Slot table. Cells are padded to their column width BEFORE styling —
 	// ANSI escape codes have zero display width but count in %-Ns padding,
@@ -325,6 +333,20 @@ func ageOrDash(sec int) string {
 // via the status JSON rather than the event bus).
 func sanitizeCell(s string) string {
 	return bus.Sanitize(s)
+}
+
+// humanBytes formats a byte count as a compact binary size, e.g. 512.0M, 1.6G.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%dB", n)
+	}
+	div, exp := int64(unit), 0
+	for x := n / unit; x >= unit; x /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f%c", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 // truncate is rune-aware so multibyte job names never render as mojibake.
