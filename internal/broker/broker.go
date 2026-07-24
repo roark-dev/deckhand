@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -391,15 +392,7 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 }
 
 func isDigestPinned(image string) bool {
-	for i := 0; i+7 <= len(image); i++ {
-		if image[i:i+8] == "@sha256:" {
-			return true
-		}
-		if i+8 > len(image) {
-			break
-		}
-	}
-	return false
+	return strings.Contains(image, "@sha256:")
 }
 
 func (b *Broker) runSession(ctx context.Context) error {
