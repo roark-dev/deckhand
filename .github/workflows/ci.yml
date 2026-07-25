@@ -13,15 +13,13 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# The Linux jobs run on deckhand's own self-hosted runner (dogfooding + no
-# GitHub-hosted minutes). PUBLIC-REPO SAFETY: fork PRs never auto-run here —
-# the repo's fork-PR policy requires maintainer approval for all external
-# contributors, so external code only runs on the Mac after review.
-# macOS stays GitHub-hosted: deckhand runs Linux containers, but the darwin
-# code paths (launchd service, peercred_darwin) still need coverage.
+# GitHub-hosted. (A self-hosted deckhand runner was tried, but running a second
+# "deckhand"-named instance on the same Docker host as another deckhand daemon
+# made them adopt each other's containers — see the per-instance container
+# scoping follow-up before self-hosting again.)
 jobs:
   lint:
-    runs-on: deckhand
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -30,7 +28,11 @@ jobs:
       - run: make lint # go vet + gofmt
 
   test:
-    runs-on: deckhand
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -38,17 +40,8 @@ jobs:
           go-version-file: go.mod
       - run: make cover # race-enabled tests + coverage gate
 
-  test-macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - run: make cover
-
   build:
-    runs-on: deckhand
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -57,7 +50,7 @@ jobs:
       - run: go build ./...
 
   tidy:
-    runs-on: deckhand
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
