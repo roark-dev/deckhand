@@ -1,4 +1,4 @@
-.PHONY: build test cover lint
+.PHONY: build test cover lint install
 
 build:
 	go build ./...
@@ -13,3 +13,11 @@ cover:
 lint:
 	go vet ./...
 	test -z "$$(gofmt -l .)"
+
+# Rebuild and install deckhand over the copy already on PATH (or via `go
+# install` if none). Atomic replace so it's safe while the daemon is running.
+# Handy after pulling a merge: `git pull && make install`.
+install:
+	@dst="$$(command -v deckhand)"; \
+	if [ -z "$$dst" ]; then go install ./cmd/deckhand && echo "installed via go install"; exit 0; fi; \
+	go build -o "$$dst.new" ./cmd/deckhand && mv "$$dst.new" "$$dst" && echo "updated $$dst"
