@@ -612,13 +612,34 @@ func TestWatcherReapsUnreportedExit(t *testing.T) {
 	b, _, provider := testBroker(t, 1, 0)
 	desire(t, b, 1)
 	s := slotByIndex(t, b, 0)
+	// A REAL job is running when the container dies without a JobCompleted —
+	// that's a genuine failure and must be counted. A real job carries a
+	// non-zero RequestID (HandleJobStarted sets it from GitHub).
+	b.slots.Mutate(s.RunnerName, func(sl *slots.Slot) {
+		sl.State = slots.Running
+		sl.Job = &slots.Job{RequestID: 42, DisplayName: "build"}
+	})
 	provider.exitContainer(s.ContainerID, 137)
 	waitFor(t, "slot freed by watcher", func() bool {
-		got := slotByIndex(t, b, 0)
-		return got.State == slots.Idle
+		return slotByIndex(t, b, 0).State == slots.Idle
 	})
 	if b.counters.failed.Load() != 1 {
-		t.Fatalf("unreported exit must count failed, got %d", b.counters.failed.Load())
+		t.Fatalf("a real job's unreported exit must count failed, got %d", b.counters.failed.Load())
+	}
+}
+
+// An idle runner (never assigned a job) recycling must NOT be counted as a
+// failed job — that over-count was the "42 failed" churn artifact.
+func TestWatcherIdleExitNotCountedFailed(t *testing.T) {
+	b, _, provider := testBroker(t, 1, 0)
+	desire(t, b, 1)
+	s := slotByIndex(t, b, 0)
+	provider.exitContainer(s.ContainerID, 137) // exits while Ready, never ran a job
+	waitFor(t, "slot freed by watcher", func() bool {
+		return slotByIndex(t, b, 0).State == slots.Idle
+	})
+	if b.counters.failed.Load() != 0 {
+		t.Fatalf("idle runner exit must not count as a failed job, got %d", b.counters.failed.Load())
 	}
 }
 

@@ -532,7 +532,7 @@ func (b *Broker) reconcile(ctx context.Context) {
 			// The container is gone (docker restart, manual rm). Its job, if
 			// any, dies with it on GitHub's side.
 			if b.slots.Free(s.Index, s.RunnerName) {
-				if s.State == slots.Running {
+				if hadRealJob(s) {
 					b.counters.failed.Add(1)
 				}
 				b.event(bus.Warn, s.Index, fmt.Sprintf("container for %s vanished — slot freed", s.RunnerName))
@@ -543,7 +543,7 @@ func (b *Broker) reconcile(ctx context.Context) {
 			if !b.isWatched(s.ContainerID) {
 				_ = b.provider.Remove(ctx, s.ContainerID)
 				if b.slots.Free(s.Index, s.RunnerName) {
-					if s.State == slots.Running {
+					if hadRealJob(s) {
 						b.counters.failed.Add(1)
 					}
 					b.event(bus.Warn, s.Index, fmt.Sprintf("runner %s had exited while unwatched — slot freed", s.RunnerName))
